@@ -19,3 +19,10 @@ Using Docker
 - Build & run:
   docker-compose up --build
 
+## TODO
+
+- [ ] Add PostgreSQL/TimescaleDB integration
+- [ ] Add Docker/docker-compose
+- [ ] Add Cron for scheduled scraping
+- [ ] Add unit/integration tests and CI pipeline
+
