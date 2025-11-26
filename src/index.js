@@ -204,7 +204,201 @@ async function scrapeMonthlyActiveEnergy(page) {
     console.log(`  ${m}: ${v === null ? '(blank)' : v}`);
   });*/
 
-  return { raw: data.map, parsed };
+  return { raw: data.map, parsed, months: data.months };
+}
+
+/* ---------- Find latest non-null month and click ---------- */
+async function findLatestNonNullMonthAndClick(page, monthsData) {
+  const GRID_SELECTOR = '#body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_gvCurveAttiva';
+  
+  console.log('[daily] Finding latest non-null month...');
+  
+  // Find the last month with non-null data
+  let lastNonNullMonth = null;
+  let lastNonNullIndex = -1;
+  
+  for (let i = monthsData.months.length - 1; i >= 0; i--) {
+    const monthName = monthsData.months[i];
+    const value = monthsData.parsed[monthName];
+    if (value !== null && value !== undefined) {
+      lastNonNullMonth = monthName;
+      lastNonNullIndex = i;
+      break;
+    }
+  }
+  
+  if (lastNonNullMonth === null) {
+    console.log('[daily] No non-null month found, skipping daily view navigation.');
+    return false;
+  }
+  
+  console.log(`[daily] Latest non-null month: ${lastNonNullMonth} (index ${lastNonNullIndex})`);
+  
+  // Click the link for this month
+  const clicked = await page.evaluate((index) => {
+    const grid = document.querySelector('#body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_gvCurveAttiva');
+    if (!grid) return false;
+    
+    const anchorNodes = Array.from(
+      grid.querySelectorAll('tr:nth-child(2) a[id^="body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_gvCurveAttiva_btnCurve"]')
+    );
+    
+    if (index < 0 || index >= anchorNodes.length) return false;
+    
+    const link = anchorNodes[index];
+    link.click();
+    return true;
+  }, lastNonNullIndex);
+  
+  if (!clicked) {
+    console.log('[daily] Failed to click monthly view link.');
+    return false;
+  }
+  
+  console.log(`[daily] Navigating to monthly view for: ${lastNonNullMonth}`);
+  await waitForIdle(page, { timeout: 30000 });
+  await sleep(2000);
+  
+  return true;
+}
+
+/* ---------- Scrape daily hourly usage ---------- */
+async function scrapeDailyHourlyUsage(page) {
+  console.log('[daily] Parsing daily hourly data...');
+  
+  // Try multiple selector strategies to find the hourly data table
+  const data = await page.evaluate(() => {
+    // Strategy 1: Look for tables with ID containing 'gvDettaglio' or similar
+    let table = document.querySelector('table[id*="gvDettaglio"]');
+    
+    // Strategy 2: Look for tables with ID containing 'Consumi' or 'Giornalier'
+    if (!table) {
+      table = document.querySelector('table[id*="Consumi"]');
+    }
+    if (!table) {
+      table = document.querySelector('table[id*="Giornalier"]');
+    }
+    
+    // Strategy 3: Look for tables with many columns (hourly data typically has 24+ columns)
+    if (!table) {
+      const tables = Array.from(document.querySelectorAll('table'));
+      for (const t of tables) {
+        const headerRow = t.querySelector('tr:first-child');
+        if (headerRow) {
+          const headers = Array.from(headerRow.querySelectorAll('th'));
+          if (headers.length >= 24) {
+            table = t;
+            break;
+          }
+        }
+      }
+    }
+    
+    if (!table) {
+      return { error: 'No suitable table found with hourly data' };
+    }
+    
+    const rows = Array.from(table.querySelectorAll('tr'));
+    if (rows.length < 2) {
+      return { error: 'Table has insufficient rows' };
+    }
+    
+    // Parse headers (first row should have hour labels or column headers)
+    const headerRow = rows[0];
+    const headers = Array.from(headerRow.querySelectorAll('th, td')).map(cell => 
+      cell.innerText.trim()
+    );
+    
+    // Parse data rows (each row should be a day with hourly values)
+    const days = [];
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      const cells = Array.from(row.querySelectorAll('td'));
+      if (cells.length === 0) continue;
+      
+      // First cell is typically the date
+      const dateCell = cells[0].innerText.trim();
+      
+      // Remaining cells are hourly values
+      const hourlyValues = [];
+      for (let j = 1; j < cells.length; j++) {
+        const value = cells[j].innerText.trim();
+        hourlyValues.push(value);
+      }
+      
+      days.push({
+        dateCell,
+        hourlyValues
+      });
+    }
+    
+    return { headers, days, tableId: table.id };
+  });
+  
+  if (data.error) {
+    console.log(`[daily] Error: ${data.error}`);
+    return null;
+  }
+  
+  console.log(`[daily] Found table with ID: ${data.tableId || 'unknown'}`);
+  console.log(`[daily] Headers: ${data.headers.length} columns`);
+  console.log(`[daily] Scraped ${data.days.length} days with hourly data.`);
+  
+  // Process and structure the data
+  const result = {
+    year: new Date().getFullYear(),
+    month: null, // Will be determined from page or context
+    days: []
+  };
+  
+  // Helper to normalize numeric strings
+  const normalizeNumber = (str) => {
+    if (!str || str === '' || str === '-' || str === 'N/A') return null;
+    const normalized = str
+      .replace(/\./g, '')    // remove thousand separators
+      .replace(',', '.')     // decimal comma -> dot
+      .replace(/[^\d.-]/g, ''); // remove stray chars
+    const num = normalized ? parseFloat(normalized) : null;
+    return Number.isFinite(num) ? num : null;
+  };
+  
+  // Parse each day
+  for (const dayData of data.days) {
+    const hours = {};
+    let totalKwh = 0;
+    let validValues = 0;
+    
+    // Map hourly values (assuming headers start from index 1 for hour columns)
+    // Generate hour labels 00:00 through 23:00
+    for (let h = 0; h < Math.min(24, dayData.hourlyValues.length); h++) {
+      const hourLabel = `${String(h).padStart(2, '0')}:00`;
+      const value = normalizeNumber(dayData.hourlyValues[h]);
+      hours[hourLabel] = value;
+      
+      if (value !== null) {
+        totalKwh += value;
+        validValues++;
+      }
+    }
+    
+    // Try to parse date from dateCell
+    let date = dayData.dateCell;
+    
+    // If there are valid hourly values, add this day
+    if (validValues > 0) {
+      result.days.push({
+        date,
+        hours,
+        total_kwh: parseFloat(totalKwh.toFixed(3))
+      });
+    }
+  }
+  
+  if (result.days.length > 0) {
+    console.log(`[daily] Sample day ${result.days[0].date}:`, JSON.stringify(result.days[0].hours, null, 2).substring(0, 200) + '...');
+  }
+  
+  return result;
 }
 
 /* ---------- Main ---------- */
@@ -230,10 +424,38 @@ async function main() {
     await clickFirstCurve(page);
 
     console.log('[main] Scraping monthly Wirkenergie...');
-    const { raw, parsed } = await scrapeMonthlyActiveEnergy(page);
+    const monthlyData = await scrapeMonthlyActiveEnergy(page);
 
     console.log('[main] Final parsed Wirkenergie object:');
-    console.log(JSON.stringify(parsed, null, 2));
+    console.log(JSON.stringify(monthlyData.parsed, null, 2));
+
+    // New feature: Scrape daily hourly usage
+    console.log('\n[main] Starting daily hourly data scraping...');
+    const navigated = await findLatestNonNullMonthAndClick(page, monthlyData);
+    
+    if (navigated) {
+      try {
+        const dailyData = await scrapeDailyHourlyUsage(page);
+        
+        if (dailyData && dailyData.days.length > 0) {
+          console.log('[main] Daily hourly data summary:');
+          console.log(`  Total days: ${dailyData.days.length}`);
+          
+          // Save to file
+          const outputFile = process.env.DAILY_OUTPUT_FILE || 'daily_usage.json';
+          fs.writeFileSync(outputFile, JSON.stringify(dailyData, null, 2));
+          console.log(`[main] Daily usage data saved to: ${outputFile}`);
+        } else {
+          console.log('[main] No daily hourly data found or parsed.');
+        }
+      } catch (e) {
+        console.error('[daily] Error scraping daily data:', e.message);
+        if (process.env.DEBUG_SHOTS === 'true') {
+          await page.screenshot({ path: 'error_daily.png', fullPage: true });
+          console.log('[daily] Saved screenshot: error_daily.png');
+        }
+      }
+    }
 
     console.log('[main] Flow complete.');
   } catch (e) {
