@@ -23,7 +23,11 @@ function getPool() {
       database: process.env.DB_NAME || 'edyna',
       user: process.env.DB_USER,
       password: process.env.DB_PASSWORD,
-      ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
+      // SSL configuration - WARNING: rejectUnauthorized: false disables certificate validation
+      // This should only be used in development. For production, use proper SSL certificates.
+      ssl: process.env.DB_SSL === 'true' ? { 
+        rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false' 
+      } : false
     };
 
     if (!config.user || !config.password) {
@@ -140,9 +144,22 @@ async function saveDailyHourlyData(dailyData) {
         const recordTimestamp = new Date(timestamp);
         recordTimestamp.setHours(hour, 0, 0, 0);
         
-        // Use UPSERT with conditional update (only update if new value is higher)
-        // Using a small tolerance (0.001 kWh) for floating-point comparison
-        const result = await client.query(
+        // Check if record exists and get current value
+        const existingResult = await client.query(
+          'SELECT kwh FROM daily_hourly_consumption WHERE timestamp = $1 AND hour = $2',
+          [recordTimestamp, hour]
+        );
+        
+        const existingKwh = existingResult.rows.length > 0 ? existingResult.rows[0].kwh : null;
+        const shouldUpdate = existingKwh === null || (kwh - existingKwh > 0.001);
+        
+        if (!shouldUpdate) {
+          // Skip - existing value is higher or equal (within tolerance)
+          continue;
+        }
+        
+        // Use UPSERT to insert or update
+        await client.query(
           `INSERT INTO daily_hourly_consumption 
            (timestamp, hour, kwh, month_name, source_date) 
            VALUES ($1, $2, $3, $4, $5)
@@ -151,21 +168,15 @@ async function saveDailyHourlyData(dailyData) {
              kwh = EXCLUDED.kwh,
              month_name = EXCLUDED.month_name,
              source_date = EXCLUDED.source_date,
-             updated_at = NOW()
-           WHERE EXCLUDED.kwh - daily_hourly_consumption.kwh > 0.001
-           RETURNING (xmax = 0) AS inserted, kwh`,
+             updated_at = NOW()`,
           [recordTimestamp, hour, kwh, dailyData.month, dateStr]
         );
         
-        // Track statistics based on RETURNING clause
-        // xmax = 0 means it was an INSERT, otherwise it was an UPDATE
-        if (result.rows.length > 0) {
-          if (result.rows[0].inserted) {
-            insertedCount++;
-          } else {
-            updatedCount++;
-            console.log(`[db] Updated ${recordTimestamp.toISOString()} hour ${hour} to ${kwh} kWh`);
-          }
+        if (existingKwh === null) {
+          insertedCount++;
+        } else {
+          updatedCount++;
+          console.log(`[db] Updated ${recordTimestamp.toISOString()} hour ${hour}: ${existingKwh} -> ${kwh} kWh`);
         }
       }
     }
