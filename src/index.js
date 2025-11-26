@@ -262,11 +262,11 @@ async function findLatestNonNullMonthAndClick(page, monthsData) {
   await waitForIdle(page, { timeout: 30000 });
   await sleep(2000);
   
-  return true;
+  return lastNonNullMonth;
 }
 
 /* ---------- Scrape daily hourly usage ---------- */
-async function scrapeDailyHourlyUsage(page) {
+async function scrapeDailyHourlyUsage(page, monthName = null) {
   console.log('[daily] Parsing daily hourly data...');
   
   // Try multiple selector strategies to find the hourly data table
@@ -347,10 +347,20 @@ async function scrapeDailyHourlyUsage(page) {
   console.log(`[daily] Headers: ${data.headers.length} columns`);
   console.log(`[daily] Scraped ${data.days.length} days with hourly data.`);
   
+  // Try to extract year from the first day's date cell, or use current year as fallback
+  let year = new Date().getFullYear();
+  if (data.days.length > 0 && data.days[0].dateCell) {
+    // Try to parse year from date cell (common formats: DD/MM/YYYY, DD.MM.YYYY, etc.)
+    const yearMatch = data.days[0].dateCell.match(/\d{4}/);
+    if (yearMatch) {
+      year = parseInt(yearMatch[0], 10);
+    }
+  }
+  
   // Process and structure the data
   const result = {
-    year: new Date().getFullYear(),
-    month: null, // Will be determined from page or context
+    year: year,
+    month: monthName, // Month name passed from context
     days: []
   };
   
@@ -434,11 +444,11 @@ async function main() {
 
     // New feature: Scrape daily hourly usage
     console.log('\n[main] Starting daily hourly data scraping...');
-    const navigated = await findLatestNonNullMonthAndClick(page, monthlyData);
+    const monthName = await findLatestNonNullMonthAndClick(page, monthlyData);
     
-    if (navigated) {
+    if (monthName) {
       try {
-        const dailyData = await scrapeDailyHourlyUsage(page);
+        const dailyData = await scrapeDailyHourlyUsage(page, monthName);
         
         if (dailyData && dailyData.days.length > 0) {
           console.log('[main] Daily hourly data summary:');
