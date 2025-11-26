@@ -113,14 +113,14 @@ async function clickVerbraucher(page) {
   const TABLE_SELECTOR = '#body_ctl00_ctl00_tcListUtenze_TList_cUFListUtenze_gvUtenze';
 
   console.log('[verbraucher] Waiting for menu item...');
-  await page.waitForSelector(MENU_SELECTOR, { timeout: 20000 });
+  await page.waitForSelector(MENU_SELECTOR, { timeout: 25000 });
 
   const beforeUrl = page.url();
   console.log('[verbraucher] Clicking "Verbraucher"...');
   await page.click(MENU_SELECTOR);
 
   // Initial idle wait
-  await waitForIdle(page, { timeout: 10000 });
+  await waitForIdle(page, { timeout: 30000 });
 
   const afterUrl = page.url();
   console.log('[verbraucher] Post-click URL changed?', beforeUrl !== afterUrl);
