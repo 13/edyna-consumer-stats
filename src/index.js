@@ -6,6 +6,7 @@
  *  - Scrape monthly Wirkenergie (kWh) values shown in curve tab
  *  - Navigate to daily view for latest month with data
  *  - Scrape daily hourly kWh usage (24-hour breakdown per day)
+ *  - Optionally save to TimescaleDB database (--db flag)
  *
  * ENV:
  *   LOGIN_URL        - Full login URL (with ReturnUrl)
@@ -14,6 +15,16 @@
  *   HEADLESS         - "true" | "false" (default true)
  *   DEBUG_SHOTS      - "true" screenshots on failure
  *   DAILY_OUTPUT_FILE - Output file for daily usage JSON (default: daily_usage.json)
+ *   DB_HOST          - Database host (default: localhost)
+ *   DB_PORT          - Database port (default: 5432)
+ *   DB_NAME          - Database name (default: edyna)
+ *   DB_USER          - Database user (required for --db mode)
+ *   DB_PASSWORD      - Database password (required for --db mode)
+ *   DB_SSL           - Enable SSL (default: false)
+ *
+ * Usage:
+ *   npm start          - Scrape and save to JSON file only
+ *   npm run start:db   - Scrape and save to both JSON file and database
  *
  * Improvements (per request):
  *   After clicking "Verbraucher" we now:
@@ -31,6 +42,7 @@
 require('dotenv').config();
 const fs = require('fs');
 const puppeteer = require('puppeteer');
+const db = require('./db');
 
 /* ---------- Utilities ---------- */
 function requireEnv(name) {
@@ -262,8 +274,7 @@ async function findLatestNonNullMonthAndClick(page, monthsData) {
   }
   
   console.log(`[daily] Navigating to monthly view for: ${lastNonNullMonth}`);
-  await waitForIdle(page, { timeout: 30000 });
-  await sleep(2000);
+  await waitForIdle(page, { timeout: 90000 });
   
   return lastNonNullMonth;
 }
@@ -413,9 +424,16 @@ async function main() {
   const password = requireEnv('PASSWORD');
 
   const args = new Set(process.argv.slice(2));
+  const dbMode = args.has('--db') || args.has('db');
 
   let browser;
   try {
+    // Initialize database if in DB mode
+    if (dbMode) {
+      console.log('[main] Database mode enabled');
+      await db.initializeSchema();
+    }
+
     browser = await launchBrowser();
     const page = await browser.newPage();
 
@@ -450,6 +468,12 @@ async function main() {
           const outputFile = process.env.DAILY_OUTPUT_FILE || 'daily_usage.json';
           fs.writeFileSync(outputFile, JSON.stringify(dailyData, null, 2));
           console.log(`[main] Daily usage data saved to: ${outputFile}`);
+          
+          // Save to database if in DB mode
+          if (dbMode) {
+            console.log('[main] Saving to database...');
+            await db.saveDailyHourlyData(dailyData);
+          }
         } else {
           console.log('[main] No daily hourly data found or parsed.');
         }
@@ -476,6 +500,9 @@ async function main() {
   } finally {
     if (browser) {
       await browser.close();
+    }
+    if (dbMode) {
+      await db.closePool();
     }
   }
 }
