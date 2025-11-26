@@ -169,7 +169,7 @@ async function clickFirstCurve(page) {
   const CURVE_BTN_ID = '#body_ctl00_ctl00_tcListUtenze_TList_cUFListUtenze_gvUtenze_btnCurve_0';
   console.log('[curve] Waiting for first curve button...');
   try {
-    await page.waitForSelector(CURVE_BTN_ID, { timeout: 90000 });
+    await page.waitForSelector(CURVE_BTN_ID, { timeout: 360000 });
   } catch {
     console.warn('[curve] Curve button not found within extended timeout. Attempting fallback detection of curve tab...');
     return;
@@ -179,7 +179,7 @@ async function clickFirstCurve(page) {
   console.log('[curve] Clicking first curve button...');
   await page.click(CURVE_BTN_ID);
 
-  await waitForIdle(page, { timeout: 90000 });
+  await waitForIdle(page, { timeout: 360000 });
   //await sleep(2000);
 
   const afterUrl = page.url();
@@ -190,7 +190,7 @@ async function clickFirstCurve(page) {
 async function scrapeMonthlyActiveEnergy(page) {
   const GRID_SELECTOR = '#body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_gvCurveAttiva';
   console.log('[scrape] Waiting for active energy grid...');
-  await page.waitForSelector(GRID_SELECTOR, { timeout: 90000 }).catch(() => {
+  await page.waitForSelector(GRID_SELECTOR, { timeout: 360000 }).catch(() => {
     throw new Error('Active energy grid not found after extended wait.');
   });
 
@@ -274,7 +274,7 @@ async function findLatestNonNullMonthAndClick(page, monthsData) {
   }
   
   console.log(`[daily] Navigating to monthly view for: ${lastNonNullMonth}`);
-  await waitForIdle(page, { timeout: 90000 });
+  await waitForIdle(page, { timeout: 360000 });
   
   return lastNonNullMonth;
 }
@@ -380,16 +380,20 @@ async function scrapeDailyHourlyUsage(page, monthName = null) {
   
   // Parse each day
   for (const dayData of data.days) {
-    const hours = {};
     let totalKwh = 0;
     let validValues = 0;
     
-    // Map hourly values (assuming headers start from index 1 for hour columns)
+    // Create a flat day record with date as first property
+    const dayRecord = {
+      date: dayData.dateCell
+    };
+    
+    // Map hourly values directly into the day record (flattened structure)
     // Generate hour labels 00:00 through 23:00
     for (let h = 0; h < Math.min(HOURS_PER_DAY, dayData.hourlyValues.length); h++) {
       const hourLabel = `${String(h).padStart(2, '0')}:00`;
       const value = normalizeNumber(dayData.hourlyValues[h]);
-      hours[hourLabel] = value;
+      dayRecord[hourLabel] = value;
       
       if (value !== null) {
         totalKwh += value;
@@ -397,21 +401,18 @@ async function scrapeDailyHourlyUsage(page, monthName = null) {
       }
     }
     
-    // Try to parse date from dateCell
-    let date = dayData.dateCell;
+    // Add total at the end
+    dayRecord.total_kwh = parseFloat(totalKwh.toFixed(3));
     
     // If there are valid hourly values, add this day
     if (validValues > 0) {
-      result.days.push({
-        date,
-        hours,
-        total_kwh: parseFloat(totalKwh.toFixed(3))
-      });
+      result.days.push(dayRecord);
     }
   }
   
   if (result.days.length > 0) {
-    console.log(`[daily] Sample day ${result.days[0].date}:`, JSON.stringify(result.days[0].hours, null, 2).substring(0, 200) + '...');
+    const sampleDay = result.days[0];
+    console.log(`[daily] Sample day ${sampleDay.date}: 00:00=${sampleDay['00:00']}, 01:00=${sampleDay['01:00']}, ... total_kwh=${sampleDay.total_kwh}`);
   }
   
   return result;

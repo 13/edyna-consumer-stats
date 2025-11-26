@@ -134,20 +134,21 @@ async function saveDailyHourlyData(dailyData) {
       }
       
       // Insert/update each hour using UPSERT with overwrite condition
-      for (const [hourStr, kwh] of Object.entries(day.hours)) {
-        if (kwh === null || kwh === undefined) continue;
+      // Hours are now flattened directly in the day object (e.g., day['00:00'], day['01:00'], etc.)
+      for (let h = 0; h < 24; h++) {
+        const hourLabel = `${String(h).padStart(2, '0')}:00`;
+        const kwh = day[hourLabel];
         
-        // Extract hour from "HH:MM" format
-        const hour = parseInt(hourStr.split(':')[0], 10);
+        if (kwh === null || kwh === undefined) continue;
         
         // Create timestamp for this specific hour
         const recordTimestamp = new Date(timestamp);
-        recordTimestamp.setHours(hour, 0, 0, 0);
+        recordTimestamp.setHours(h, 0, 0, 0);
         
         // Check if record exists and get current value
         const existingResult = await client.query(
           'SELECT kwh FROM daily_hourly_consumption WHERE timestamp = $1 AND hour = $2',
-          [recordTimestamp, hour]
+          [recordTimestamp, h]
         );
         
         const existingKwh = existingResult.rows.length > 0 ? existingResult.rows[0].kwh : null;
@@ -169,14 +170,14 @@ async function saveDailyHourlyData(dailyData) {
              month_name = EXCLUDED.month_name,
              source_date = EXCLUDED.source_date,
              updated_at = NOW()`,
-          [recordTimestamp, hour, kwh, dailyData.month, dateStr]
+          [recordTimestamp, h, kwh, dailyData.month, dateStr]
         );
         
         if (existingKwh === null) {
           insertedCount++;
         } else {
           updatedCount++;
-          console.log(`[db] Updated ${recordTimestamp.toISOString()} hour ${hour}: ${existingKwh} -> ${kwh} kWh`);
+          console.log(`[db] Updated ${recordTimestamp.toISOString()} hour ${h}: ${existingKwh} -> ${kwh} kWh`);
         }
       }
     }
