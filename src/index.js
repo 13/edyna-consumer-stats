@@ -4,6 +4,8 @@
  *  - Click "Verbraucher" (longer / configurable wait)
  *  - Click first curve button (Stundenprofil)
  *  - Scrape monthly Wirkenergie (kWh) values shown in curve tab
+ *  - Navigate to daily view for latest month with data
+ *  - Scrape daily hourly kWh usage (24-hour breakdown per day)
  *
  * ENV:
  *   LOGIN_URL        - Full login URL (with ReturnUrl)
@@ -11,6 +13,7 @@
  *   PASSWORD         - Portal password
  *   HEADLESS         - "true" | "false" (default true)
  *   DEBUG_SHOTS      - "true" screenshots on failure
+ *   DAILY_OUTPUT_FILE - Output file for daily usage JSON (default: daily_usage.json)
  *
  * Improvements (per request):
  *   After clicking "Verbraucher" we now:
