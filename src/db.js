@@ -129,7 +129,7 @@ async function saveDailyHourlyData(dailyData) {
         continue;
       }
       
-      // Insert/update each hour
+      // Insert/update each hour using UPSERT with overwrite condition
       for (const [hourStr, kwh] of Object.entries(day.hours)) {
         if (kwh === null || kwh === undefined) continue;
         
@@ -137,36 +137,34 @@ async function saveDailyHourlyData(dailyData) {
         const hour = parseInt(hourStr.split(':')[0], 10);
         
         // Create timestamp for this specific hour
-        const hourTimestamp = new Date(timestamp);
-        hourTimestamp.setHours(hour, 0, 0, 0);
+        const recordTimestamp = new Date(timestamp);
+        recordTimestamp.setHours(hour, 0, 0, 0);
         
-        // Check if value exists
-        const existingResult = await client.query(
-          'SELECT kwh FROM daily_hourly_consumption WHERE timestamp = $1 AND hour = $2',
-          [hourTimestamp, hour]
+        // Use UPSERT with conditional update (only update if new value is higher)
+        // Using a small tolerance (0.001 kWh) for floating-point comparison
+        const result = await client.query(
+          `INSERT INTO daily_hourly_consumption 
+           (timestamp, hour, kwh, month_name, source_date) 
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (timestamp, hour) 
+           DO UPDATE SET 
+             kwh = EXCLUDED.kwh,
+             month_name = EXCLUDED.month_name,
+             source_date = EXCLUDED.source_date,
+             updated_at = NOW()
+           WHERE EXCLUDED.kwh - daily_hourly_consumption.kwh > 0.001
+           RETURNING (xmax = 0) AS inserted, kwh`,
+          [recordTimestamp, hour, kwh, dailyData.month, dateStr]
         );
         
-        if (existingResult.rows.length === 0) {
-          // Insert new record
-          await client.query(
-            `INSERT INTO daily_hourly_consumption 
-             (timestamp, hour, kwh, month_name, source_date) 
-             VALUES ($1, $2, $3, $4, $5)`,
-            [hourTimestamp, hour, kwh, dailyData.month, dateStr]
-          );
-          insertedCount++;
-        } else {
-          // Check if new value is higher
-          const existingKwh = existingResult.rows[0].kwh;
-          if (kwh > existingKwh) {
-            await client.query(
-              `UPDATE daily_hourly_consumption 
-               SET kwh = $1, month_name = $2, source_date = $3, updated_at = NOW() 
-               WHERE timestamp = $4 AND hour = $5`,
-              [kwh, dailyData.month, dateStr, hourTimestamp, hour]
-            );
+        // Track statistics based on RETURNING clause
+        // xmax = 0 means it was an INSERT, otherwise it was an UPDATE
+        if (result.rows.length > 0) {
+          if (result.rows[0].inserted) {
+            insertedCount++;
+          } else {
             updatedCount++;
-            console.log(`[db] Updated ${hourTimestamp.toISOString()} hour ${hour}: ${existingKwh} -> ${kwh}`);
+            console.log(`[db] Updated ${recordTimestamp.toISOString()} hour ${hour} to ${kwh} kWh`);
           }
         }
       }
