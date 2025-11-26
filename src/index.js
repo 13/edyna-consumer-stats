@@ -380,20 +380,16 @@ async function scrapeDailyHourlyUsage(page, monthName = null) {
   
   // Parse each day
   for (const dayData of data.days) {
+    const hours = {};
     let totalKwh = 0;
     let validValues = 0;
     
-    // Create a flat day record with date as first property
-    const dayRecord = {
-      date: dayData.dateCell
-    };
-    
-    // Map hourly values directly into the day record (flattened structure)
+    // Map hourly values into a nested hours object
     // Generate hour labels 00:00 through 23:00
     for (let h = 0; h < Math.min(HOURS_PER_DAY, dayData.hourlyValues.length); h++) {
       const hourLabel = `${String(h).padStart(2, '0')}:00`;
       const value = normalizeNumber(dayData.hourlyValues[h]);
-      dayRecord[hourLabel] = value;
+      hours[hourLabel] = value;
       
       if (value !== null) {
         totalKwh += value;
@@ -401,18 +397,19 @@ async function scrapeDailyHourlyUsage(page, monthName = null) {
       }
     }
     
-    // Add total at the end
-    dayRecord.total_kwh = parseFloat(totalKwh.toFixed(3));
-    
     // If there are valid hourly values, add this day
     if (validValues > 0) {
-      result.days.push(dayRecord);
+      result.days.push({
+        date: dayData.dateCell,
+        hours,
+        total_kwh: parseFloat(totalKwh.toFixed(3))
+      });
     }
   }
   
   if (result.days.length > 0) {
     const sampleDay = result.days[0];
-    console.log(`[daily] Sample day ${sampleDay.date}: 00:00=${sampleDay['00:00']}, 01:00=${sampleDay['01:00']}, ... total_kwh=${sampleDay.total_kwh}`);
+    console.log(`[daily] Sample day ${sampleDay.date}: 00:00=${sampleDay.hours['00:00']}, 01:00=${sampleDay.hours['01:00']}, ... total_kwh=${sampleDay.total_kwh}`);
   }
   
   return result;

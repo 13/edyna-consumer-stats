@@ -137,10 +137,10 @@ async function saveDailyHourlyData(dailyData) {
       }
       
       // Insert/update each hour using UPSERT with overwrite condition
-      // Hours are now flattened directly in the day object (e.g., day['00:00'], day['01:00'], etc.)
+      // Hours are in a nested object (day.hours['00:00'], day.hours['01:00'], etc.)
       for (let h = 0; h < HOURS_PER_DAY; h++) {
         const hourLabel = `${String(h).padStart(2, '0')}:00`;
-        const kwh = day[hourLabel];
+        const kwh = day.hours[hourLabel];
         
         if (kwh === null || kwh === undefined) continue;
         
