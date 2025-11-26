@@ -46,6 +46,20 @@ function sleep(ms) {
   return new Promise(res => setTimeout(res, ms));
 }
 
+// Helper to normalize numeric strings (handles localized formatting)
+function normalizeNumber(str) {
+  if (!str || str === '' || str === '-' || str === 'N/A') return null;
+  const normalized = str
+    .replace(/\./g, '')    // remove thousand separators
+    .replace(',', '.')     // decimal comma -> dot
+    .replace(/[^\d.-]/g, ''); // remove stray chars
+  const num = normalized ? parseFloat(normalized) : null;
+  return Number.isFinite(num) ? num : null;
+}
+
+// Constants
+const HOURS_PER_DAY = 24;
+
 async function launchBrowser() {
   const headlessEnv = process.env.HEADLESS;
   const headless = headlessEnv ? headlessEnv === 'true' : true;
@@ -190,16 +204,7 @@ async function scrapeMonthlyActiveEnergy(page) {
 
   const parsed = {};
   for (const [month, raw] of Object.entries(data.map)) {
-    if (!raw) {
-      parsed[month] = null;
-      continue;
-    }
-    const normalized = raw
-      .replace(/\./g, '')    // remove thousand separators
-      .replace(',', '.')     // decimal comma -> dot
-      .replace(/[^\d.]/g, ''); // remove stray chars
-    const num = normalized ? parseFloat(normalized) : null;
-    parsed[month] = Number.isFinite(num) ? num : null;
+    parsed[month] = normalizeNumber(raw);
   }
 
   /*console.log('[scrape] Wirkenergie (kWh) per month:');
@@ -212,8 +217,6 @@ async function scrapeMonthlyActiveEnergy(page) {
 
 /* ---------- Find latest non-null month and click ---------- */
 async function findLatestNonNullMonthAndClick(page, monthsData) {
-  const GRID_SELECTOR = '#body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_gvCurveAttiva';
-  
   console.log('[daily] Finding latest non-null month...');
   
   // Find the last month with non-null data
@@ -364,17 +367,6 @@ async function scrapeDailyHourlyUsage(page, monthName = null) {
     days: []
   };
   
-  // Helper to normalize numeric strings
-  const normalizeNumber = (str) => {
-    if (!str || str === '' || str === '-' || str === 'N/A') return null;
-    const normalized = str
-      .replace(/\./g, '')    // remove thousand separators
-      .replace(',', '.')     // decimal comma -> dot
-      .replace(/[^\d.-]/g, ''); // remove stray chars
-    const num = normalized ? parseFloat(normalized) : null;
-    return Number.isFinite(num) ? num : null;
-  };
-  
   // Parse each day
   for (const dayData of data.days) {
     const hours = {};
@@ -383,7 +375,7 @@ async function scrapeDailyHourlyUsage(page, monthName = null) {
     
     // Map hourly values (assuming headers start from index 1 for hour columns)
     // Generate hour labels 00:00 through 23:00
-    for (let h = 0; h < Math.min(24, dayData.hourlyValues.length); h++) {
+    for (let h = 0; h < Math.min(HOURS_PER_DAY, dayData.hourlyValues.length); h++) {
       const hourLabel = `${String(h).padStart(2, '0')}:00`;
       const value = normalizeNumber(dayData.hourlyValues[h]);
       hours[hourLabel] = value;
