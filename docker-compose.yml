@@ -11,41 +11,9 @@ services:
       - PASSWORD=${PASSWORD}
       - HEADLESS=true
       - DEBUG_SHOTS=${DEBUG_SHOTS:-false}
-      - DB_HOST=db
-      - DB_PORT=5432
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT:-5432}
       - DB_NAME=${DB_NAME:-edyna}
-      - DB_USER=${DB_USER:-edyna}
+      - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
-      - DB_SSL=false
-    depends_on:
-      db:
-        condition: service_healthy
-    networks:
-      - edyna-network
-
-  db:
-    image: timescale/timescaledb:latest-pg15
-    container_name: edyna-db
-    restart: unless-stopped
-    environment:
-      - POSTGRES_DB=${DB_NAME:-edyna}
-      - POSTGRES_USER=${DB_USER:-edyna}
-      - POSTGRES_PASSWORD=${DB_PASSWORD}
-    volumes:
-      - edyna-db-data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-edyna} -d ${DB_NAME:-edyna}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - edyna-network
-
-volumes:
-  edyna-db-data:
-
-networks:
-  edyna-network:
-    driver: bridge
+      - DB_SSL=${DB_SSL:-false}

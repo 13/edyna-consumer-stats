@@ -19,9 +19,9 @@ Scrape consumer statistics from the Edyna distributor portal and store them in P
 
 ## Using Docker
 
-The easiest way to run this project is with Docker Compose, which includes:
+The easiest way to run this project is with Docker Compose:
 - The scraper with a cron job (runs daily at 12:00)
-- TimescaleDB database
+- Connects to your external PostgreSQL/TimescaleDB database
 
 ### Setup
 
@@ -35,10 +35,12 @@ The easiest way to run this project is with Docker Compose, which includes:
    LOGIN_URL=https://portaledistributore.edyna.net/...
    USERNAME=your_username
    PASSWORD=your_password
-   DB_PASSWORD=your_secure_db_password
+   DB_HOST=your_database_host
+   DB_USER=your_db_user
+   DB_PASSWORD=your_db_password
    ```
 
-3. Start the containers:
+3. Start the container:
    ```bash
    docker-compose up -d --build
    ```
