@@ -80,15 +80,11 @@ The tool will:
 
 #### Database Schema
 ```sql
-CREATE TABLE daily_hourly_consumption (
-  timestamp TIMESTAMPTZ NOT NULL,
-  hour INTEGER NOT NULL,
+CREATE TABLE edyna_hourly (
+  timestamp TIMESTAMPTZ NOT NULL PRIMARY KEY,
   kwh DOUBLE PRECISION NOT NULL,
-  month_name TEXT,
-  source_date TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW(),
-  PRIMARY KEY (timestamp, hour)
+  updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 ```
 

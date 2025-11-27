@@ -55,23 +55,19 @@ async function initializeSchema() {
   try {
     console.log('[db] Creating schema if not exists...');
     
-    // Create main table for daily hourly consumption
+    // Create main table for hourly consumption (timestamp includes hour)
     await client.query(`
-      CREATE TABLE IF NOT EXISTS daily_hourly_consumption (
-        timestamp TIMESTAMPTZ NOT NULL,
-        hour INTEGER NOT NULL CHECK (hour >= 0 AND hour < 24),
+      CREATE TABLE IF NOT EXISTS edyna_hourly (
+        timestamp TIMESTAMPTZ NOT NULL PRIMARY KEY,
         kwh DOUBLE PRECISION NOT NULL,
-        month_name TEXT,
-        source_date TEXT,
         created_at TIMESTAMPTZ DEFAULT NOW(),
-        updated_at TIMESTAMPTZ DEFAULT NOW(),
-        PRIMARY KEY (timestamp, hour)
+        updated_at TIMESTAMPTZ DEFAULT NOW()
       );
     `);
     
     // Convert to hypertable if TimescaleDB extension is available
     await client.query(`
-      SELECT create_hypertable('daily_hourly_consumption', 'timestamp', 
+      SELECT create_hypertable('edyna_hourly', 'timestamp', 
         if_not_exists => TRUE, 
         migrate_data => TRUE
       );
@@ -87,8 +83,8 @@ async function initializeSchema() {
     
     // Create index for efficient queries
     await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_daily_hourly_timestamp 
-      ON daily_hourly_consumption (timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_edyna_hourly_timestamp 
+      ON edyna_hourly (timestamp DESC);
     `);
     
     console.log('[db] Schema initialized successfully');
@@ -144,14 +140,14 @@ async function saveDailyHourlyData(dailyData) {
         
         if (kwh === null || kwh === undefined) continue;
         
-        // Create timestamp for this specific hour
+        // Create timestamp for this specific hour (hour is embedded in timestamp)
         const recordTimestamp = new Date(timestamp);
         recordTimestamp.setHours(h, 0, 0, 0);
         
         // Check if record exists and get current value
         const existingResult = await client.query(
-          'SELECT kwh FROM daily_hourly_consumption WHERE timestamp = $1 AND hour = $2',
-          [recordTimestamp, h]
+          'SELECT kwh FROM edyna_hourly WHERE timestamp = $1',
+          [recordTimestamp]
         );
         
         const existingKwh = existingResult.rows.length > 0 ? existingResult.rows[0].kwh : null;
@@ -164,23 +160,20 @@ async function saveDailyHourlyData(dailyData) {
         
         // Use UPSERT to insert or update
         await client.query(
-          `INSERT INTO daily_hourly_consumption 
-           (timestamp, hour, kwh, month_name, source_date) 
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (timestamp, hour) 
+          `INSERT INTO edyna_hourly (timestamp, kwh) 
+           VALUES ($1, $2)
+           ON CONFLICT (timestamp) 
            DO UPDATE SET 
              kwh = EXCLUDED.kwh,
-             month_name = EXCLUDED.month_name,
-             source_date = EXCLUDED.source_date,
              updated_at = NOW()`,
-          [recordTimestamp, h, kwh, dailyData.month, dateStr]
+          [recordTimestamp, kwh]
         );
         
         if (existingKwh === null) {
           insertedCount++;
         } else {
           updatedCount++;
-          console.log(`[db] Updated ${recordTimestamp.toISOString()} hour ${h}: ${existingKwh} -> ${kwh} kWh`);
+          console.log(`[db] Updated ${recordTimestamp.toISOString()}: ${existingKwh} -> ${kwh} kWh`);
         }
       }
     }
