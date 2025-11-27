@@ -29,7 +29,7 @@ After scraping monthly data, the tool automatically:
 1. Identifies the most recent month with non-null data
 2. Clicks on that month to open the daily view
 3. Extracts hourly kWh usage for each day (24-hour breakdown)
-4. Saves the data to a JSON file and/or TimescaleDB database
+4. Saves the data to TimescaleDB database
 
 #### Daily Data Output
 The daily data is structured as:
@@ -89,7 +89,6 @@ CREATE TABLE edyna_hourly (
 ```
 
 #### Environment Variables
-- `DAILY_OUTPUT_FILE`: Path to save daily usage JSON (default: `daily_usage.json`)
 - `DEBUG_SHOTS`: Set to `true` to save screenshots on errors
 - `HEADLESS`: Set to `false` to see browser automation
 - `DB_HOST`: Database host (default: `localhost`)

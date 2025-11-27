@@ -6,7 +6,7 @@
  *  - Scrape monthly Wirkenergie (kWh) values shown in curve tab
  *  - Navigate to daily view for latest month with data
  *  - Scrape daily hourly kWh usage (24-hour breakdown per day)
- *  - Optionally save to TimescaleDB database (--db flag)
+ *  - Save to TimescaleDB database (--db flag)
  *
  * ENV:
  *   LOGIN_URL        - Full login URL (with ReturnUrl)
@@ -14,7 +14,6 @@
  *   PASSWORD         - Portal password
  *   HEADLESS         - "true" | "false" (default true)
  *   DEBUG_SHOTS      - "true" screenshots on failure
- *   DAILY_OUTPUT_FILE - Output file for daily usage JSON (default: daily_usage.json)
  *   DB_HOST          - Database host (default: localhost)
  *   DB_PORT          - Database port (default: 5432)
  *   DB_NAME          - Database name (default: edyna)
@@ -23,8 +22,8 @@
  *   DB_SSL           - Enable SSL (default: false)
  *
  * Usage:
- *   npm start          - Scrape and save to JSON file only
- *   npm run start:db   - Scrape and save to both JSON file and database
+ *   npm start          - Scrape only (no database)
+ *   npm run start:db   - Scrape and save to database
  *
  * Improvements (per request):
  *   After clicking "Verbraucher" we now:
@@ -40,7 +39,6 @@
  */
 
 require('dotenv').config();
-const fs = require('fs');
 const puppeteer = require('puppeteer');
 const db = require('./db');
 
@@ -461,11 +459,6 @@ async function main() {
         if (dailyData && dailyData.days.length > 0) {
           console.log('[main] Daily hourly data summary:');
           console.log(`  Total days: ${dailyData.days.length}`);
-          
-          // Save to file
-          const outputFile = process.env.DAILY_OUTPUT_FILE || 'daily_usage.json';
-          fs.writeFileSync(outputFile, JSON.stringify(dailyData, null, 2));
-          console.log(`[main] Daily usage data saved to: ${outputFile}`);
           
           // Save to database if in DB mode
           if (dbMode) {
