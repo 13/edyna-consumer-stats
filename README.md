@@ -1,23 +1,61 @@
 # edyna-consumer-stats
 
-Scrape consumer statistics from the Edyna distributor portal and store them in PostgreSQL.
+Scrape consumer statistics from the Edyna distributor portal and store them in PostgreSQL/TimescaleDB.
 
-Prerequisites
-- Node.js 25+ and npm (or Docker)
+## Prerequisites
+- Node.js 20+ and npm (or Docker)
 - If the site requires authentication, provide credentials in .env (see below)
 
-Quick start (local)
+## Quick start (local)
 1. Copy .env.example to .env and edit variables.
 2. Install:
+   ```bash
    npm install
+   ```
 3. Run one-time scrape:
-   npm run scrape
-4. Start server + scheduler:
-   npm start
+   ```bash
+   npm run start:db
+   ```
 
-Using Docker
-- Build & run:
-  docker-compose up --build
+## Using Docker
+
+The easiest way to run this project is with Docker Compose, which includes:
+- The scraper with a cron job (runs daily at 12:00)
+- TimescaleDB database
+
+### Setup
+
+1. Copy `.env.example` to `.env` and configure:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Edit `.env` with your credentials:
+   ```
+   LOGIN_URL=https://portaledistributore.edyna.net/...
+   USERNAME=your_username
+   PASSWORD=your_password
+   DB_PASSWORD=your_secure_db_password
+   ```
+
+3. Start the containers:
+   ```bash
+   docker-compose up -d --build
+   ```
+
+4. View logs:
+   ```bash
+   docker-compose logs -f edyna-scraper
+   ```
+
+### Cron Schedule
+The scraper runs automatically every day at **12:00** (noon). You can modify the schedule in the `Dockerfile` by editing the cron expression.
+
+### Manual Run
+To run the scraper manually inside the container:
+```bash
+docker-compose exec edyna-scraper node src/index.js --db
+```
 
 ## Features
 
@@ -53,9 +91,9 @@ The daily data is structured as:
 ```
 
 ### TimescaleDB Integration
-The tool can save scraped data directly to a PostgreSQL/TimescaleDB database.
+The tool saves scraped data directly to a PostgreSQL/TimescaleDB database.
 
-#### Database Setup
+#### Database Setup (without Docker)
 1. Create a PostgreSQL/TimescaleDB database
 2. Configure database credentials in `.env`:
    ```
@@ -89,9 +127,12 @@ CREATE TABLE edyna_hourly (
 ```
 
 #### Environment Variables
+- `LOGIN_URL`: Edyna portal login URL
+- `USERNAME`: Portal username
+- `PASSWORD`: Portal password
 - `DEBUG_SHOTS`: Set to `true` to save screenshots on errors
-- `HEADLESS`: Set to `false` to see browser automation
-- `DB_HOST`: Database host (default: `localhost`)
+- `HEADLESS`: Set to `false` to see browser automation (default: `true`)
+- `DB_HOST`: Database host (default: `localhost`, use `db` for Docker)
 - `DB_PORT`: Database port (default: `5432`)
 - `DB_NAME`: Database name (default: `edyna`)
 - `DB_USER`: Database user (required for DB mode)
@@ -101,7 +142,7 @@ CREATE TABLE edyna_hourly (
 ## TODO
 
 - [x] Add PostgreSQL/TimescaleDB integration
-- [ ] Add Docker/docker-compose
-- [ ] Add Cron for scheduled scraping
+- [x] Add Docker/docker-compose
+- [x] Add Cron for scheduled scraping
 - [ ] Add unit/integration tests and CI pipeline
 
