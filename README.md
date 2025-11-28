@@ -20,7 +20,8 @@ Scrape consumer statistics from the Edyna distributor portal and store them in P
 ## Using Docker
 
 The easiest way to run this project is with Docker Compose:
-- The scraper with a cron job (runs daily at 12:00)
+- Uses `node:20-alpine` for a lightweight image
+- Uses `node-cron` for scheduling (runs daily at 12:00 by default)
 - Connects to your external PostgreSQL/TimescaleDB database
 
 ### Setup
@@ -51,7 +52,12 @@ The easiest way to run this project is with Docker Compose:
    ```
 
 ### Cron Schedule
-The scraper runs automatically every day at **12:00** (noon). You can modify the schedule in the `Dockerfile` by editing the cron expression.
+The scraper runs automatically every day at **12:00** (noon). You can customize the schedule via environment variable:
+```
+CRON_SCHEDULE=0 12 * * *  # Default: daily at 12:00
+TZ=Europe/Rome            # Timezone
+RUN_ON_START=false        # Set to true to run immediately on container start
+```
 
 ### Manual Run
 To run the scraper manually inside the container:
