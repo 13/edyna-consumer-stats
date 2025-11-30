@@ -1,17 +1,7 @@
 FROM node:25-alpine
 
-# Install Chromium and dependencies for Puppeteer
-RUN apk add --no-cache \
-    chromium \
-    nss \
-    freetype \
-    harfbuzz \
-    ca-certificates \
-    ttf-freefont
-
-# Set Puppeteer to use system Chromium
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+# Install only ca-certificates (needed for HTTPS requests)
+RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
 
