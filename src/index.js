@@ -11,6 +11,7 @@
  *   PASSWORD         - Portal password
  *   HEADLESS         - "true" | "false" (default true)
  *   DEBUG_SHOTS      - "true" screenshots on failure
+ *   USER_AGENT       - Custom User-Agent string (optional, defaults to Chrome)
  *
  * Improvements (per request):
  *   After clicking "Verbraucher" we now:
@@ -43,10 +44,12 @@ function sleep(ms) {
   return new Promise(res => setTimeout(res, ms));
 }
 
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
 async function launchBrowser() {
   const headlessEnv = process.env.HEADLESS;
   const headless = headlessEnv ? headlessEnv === 'true' : true;
-  return puppeteer.launch({
+  const browser = await puppeteer.launch({
     headless,
     args: [
       '--no-sandbox',
@@ -55,6 +58,11 @@ async function launchBrowser() {
     ],
     defaultViewport: { width: 1400, height: 900 }
   });
+  return browser;
+}
+
+function getUserAgent() {
+  return process.env.USER_AGENT || DEFAULT_USER_AGENT;
 }
 
 /* ---------- Login Flow ---------- */
@@ -219,6 +227,10 @@ async function main() {
   try {
     browser = await launchBrowser();
     const page = await browser.newPage();
+
+    const userAgent = getUserAgent();
+    await page.setUserAgent(userAgent);
+    console.log('[main] Using User-Agent:', userAgent);
 
     console.log('[main] Starting login...');
     await performLogin(page, { loginUrl, username, password });
