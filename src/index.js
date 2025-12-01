@@ -225,122 +225,21 @@ async function scrapeMonthlyActiveEnergy(page) {
   return { raw: data.map, parsed, months: data.months };
 }
 
-/* ---------- Check if we need to go to previous month/year ---------- */
-function shouldUsePreviousMonth() {
-  const today = new Date();
-  const dayOfMonth = today.getDate();
-  return dayOfMonth === 1;
-}
-
-function shouldUsePreviousYear() {
-  const today = new Date();
-  const dayOfMonth = today.getDate();
-  const month = today.getMonth(); // 0-indexed, January = 0
-  return dayOfMonth === 1 && month === 0; // January 1st
-}
-
-/* ---------- Select previous year in dropdown ---------- */
-async function selectPreviousYear(page) {
-  const YEAR_DROPDOWN_SELECTOR = '#body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_ddlAnno';
-  
-  console.log('[daily] January 1st detected - selecting previous year...');
-  
-  try {
-    await page.waitForSelector(YEAR_DROPDOWN_SELECTOR, { timeout: 30000 });
-    
-    // Get current year options and select previous year
-    const previousYear = await page.evaluate((selector) => {
-      const dropdown = document.querySelector(selector);
-      if (!dropdown) return null;
-      
-      const options = Array.from(dropdown.options);
-      const currentIndex = dropdown.selectedIndex;
-      
-      // Find the previous year option (usually next in dropdown since years are often sorted descending)
-      // Or find the option with value = currentYear - 1
-      const currentYear = parseInt(dropdown.value, 10);
-      const targetYear = currentYear - 1;
-      
-      for (let i = 0; i < options.length; i++) {
-        if (parseInt(options[i].value, 10) === targetYear) {
-          dropdown.selectedIndex = i;
-          dropdown.dispatchEvent(new Event('change', { bubbles: true }));
-          return targetYear;
-        }
-      }
-      
-      return null;
-    }, YEAR_DROPDOWN_SELECTOR);
-    
-    if (previousYear) {
-      console.log(`[daily] Selected previous year: ${previousYear}`);
-      await waitForIdle(page, { timeout: 360000 });
-      return true;
-    } else {
-      console.log('[daily] Could not find previous year in dropdown.');
-      return false;
-    }
-  } catch (e) {
-    console.log(`[daily] Error selecting previous year: ${e.message}`);
-    return false;
-  }
-}
-
 /* ---------- Find latest non-null month and click ---------- */
 async function findLatestNonNullMonthAndClick(page, monthsData) {
   console.log('[daily] Finding latest non-null month...');
-  
-  // Check if we need to handle first day of month/year edge cases
-  const needPreviousMonth = shouldUsePreviousMonth();
-  const needPreviousYear = shouldUsePreviousYear();
-  
-  if (needPreviousYear) {
-    console.log('[daily] Today is January 1st - need to go to previous year, December');
-    const yearChanged = await selectPreviousYear(page);
-    if (yearChanged) {
-      // Re-scrape the monthly data for the new year
-      console.log('[daily] Re-scraping monthly data for previous year...');
-      const newMonthlyData = await scrapeMonthlyActiveEnergy(page);
-      monthsData = newMonthlyData;
-    }
-  }
   
   // Find the last month with non-null data
   let lastNonNullMonth = null;
   let lastNonNullIndex = -1;
   
-  // If first day of month (but not Jan 1), we want to skip the current month
-  // and find the previous month with data
-  const skipCurrentMonth = needPreviousMonth && !needPreviousYear;
-  
   for (let i = monthsData.months.length - 1; i >= 0; i--) {
     const monthName = monthsData.months[i];
     const value = monthsData.parsed[monthName];
     if (value !== null && value !== undefined) {
-      // If we need to skip current month, skip the first non-null we find
-      // and continue to find the previous one
-      if (skipCurrentMonth && lastNonNullMonth === null) {
-        console.log(`[daily] First day of month detected - skipping current month: ${monthName}`);
-        // Continue to find the next non-null month (which is the previous month)
-        continue;
-      }
       lastNonNullMonth = monthName;
       lastNonNullIndex = i;
       break;
-    }
-  }
-  
-  // For January 1st case, after selecting previous year, use the last month (December)
-  if (needPreviousYear && lastNonNullMonth === null) {
-    // Try to find December or the last month with data
-    for (let i = monthsData.months.length - 1; i >= 0; i--) {
-      const monthName = monthsData.months[i];
-      const value = monthsData.parsed[monthName];
-      if (value !== null && value !== undefined) {
-        lastNonNullMonth = monthName;
-        lastNonNullIndex = i;
-        break;
-      }
     }
   }
   
