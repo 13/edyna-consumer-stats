@@ -15,6 +15,6 @@ services:
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_SSL=${DB_SSL:-false}
-      - CRON_SCHEDULE=${CRON_SCHEDULE:-0 8,10 * * *}
+      - CRON_SCHEDULE=${CRON_SCHEDULE:-0 8,9,10 * * *}
       - TZ=${TZ:-Europe/Rome}
       - RUN_ON_START=${RUN_ON_START:-false}
