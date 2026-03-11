@@ -22,8 +22,12 @@
  *   DB_SSL           - Enable SSL (default: false)
  *
  * Usage:
- *   npm start          - Scrape only (no database)
- *   npm run start:db   - Scrape and save to database
+ *   npm start                        - Scrape only (no database), latest month
+ *   npm run start:db                 - Scrape and save to database, latest month
+ *   node src/index.js --year 2025               - Scrape specific year
+ *   node src/index.js --month 3                 - Scrape specific month (1=Jan … 12=Dec)
+ *   node src/index.js --year 2025 --month 3     - Scrape March 2025
+ *   node src/index.js --db --year 2025 --month 3 - Above + save to database
  *
  * Improvements (per request):
  *   After clicking "Verbraucher" we now:
@@ -184,6 +188,32 @@ async function clickFirstCurve(page) {
   console.log('[curve] URL changed?', beforeUrl !== afterUrl);
 }
 
+/* ---------- Select year in ddlAnno dropdown ---------- */
+async function selectYear(page, year) {
+  const SELECT_ID = '#body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_ddlAnno';
+  console.log(`[year] Waiting for year dropdown...`);
+  await page.waitForSelector(SELECT_ID, { timeout: 60000 }).catch(() => {
+    throw new Error('Year dropdown (ddlAnno) not found.');
+  });
+
+  const available = await page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return [];
+    return Array.from(el.options).map(o => o.value);
+  }, SELECT_ID);
+
+  if (!available.includes(String(year))) {
+    throw new Error(`Year ${year} is not available in the dropdown. Available: ${available.join(', ')}`);
+  }
+
+  console.log(`[year] Selecting year: ${year}`);
+  await page.select(SELECT_ID, String(year));
+
+  // The select has an onchange postback — wait for the page to settle
+  await waitForIdle(page, { timeout: 60000 });
+  console.log(`[year] Year ${year} selected and page reloaded.`);
+}
+
 /* ---------- Scrape monthly active energy ---------- */
 async function scrapeMonthlyActiveEnergy(page) {
   const GRID_SELECTOR = '#body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_gvCurveAttiva';
@@ -226,29 +256,45 @@ async function scrapeMonthlyActiveEnergy(page) {
 }
 
 /* ---------- Find latest non-null month and click ---------- */
-async function findLatestNonNullMonthAndClick(page, monthsData) {
-  console.log('[daily] Finding latest non-null month...');
-  
-  // Find the last month with non-null data
+/**
+ * @param {object} page          - Puppeteer page
+ * @param {object} monthsData    - { months, parsed } from scrapeMonthlyActiveEnergy
+ * @param {number|null} targetMonthIndex - 0-based month index (0=Jan … 11=Dec).
+ *                                         When null, auto-selects the latest non-null month.
+ */
+async function findLatestNonNullMonthAndClick(page, monthsData, targetMonthIndex = null) {
   let lastNonNullMonth = null;
   let lastNonNullIndex = -1;
-  
-  for (let i = monthsData.months.length - 1; i >= 0; i--) {
-    const monthName = monthsData.months[i];
-    const value = monthsData.parsed[monthName];
-    if (value !== null && value !== undefined) {
-      lastNonNullMonth = monthName;
-      lastNonNullIndex = i;
-      break;
+
+  if (targetMonthIndex !== null) {
+    // Use the explicitly requested month index
+    if (targetMonthIndex < 0 || targetMonthIndex >= monthsData.months.length) {
+      console.log(`[daily] Requested month index ${targetMonthIndex} is out of range (0–${monthsData.months.length - 1}). Skipping.`);
+      return false;
+    }
+    lastNonNullIndex = targetMonthIndex;
+    lastNonNullMonth = monthsData.months[targetMonthIndex];
+    console.log(`[daily] Using requested month: ${lastNonNullMonth} (index ${lastNonNullIndex})`);
+  } else {
+    console.log('[daily] Finding latest non-null month...');
+    // Find the last month with non-null data
+    for (let i = monthsData.months.length - 1; i >= 0; i--) {
+      const monthName = monthsData.months[i];
+      const value = monthsData.parsed[monthName];
+      if (value !== null && value !== undefined) {
+        lastNonNullMonth = monthName;
+        lastNonNullIndex = i;
+        break;
+      }
     }
   }
-  
+
   if (lastNonNullMonth === null) {
     console.log('[daily] No non-null month found, skipping daily view navigation.');
     return false;
   }
-  
-  console.log(`[daily] Latest non-null month: ${lastNonNullMonth} (index ${lastNonNullIndex})`);
+
+  console.log(`[daily] Target month: ${lastNonNullMonth} (index ${lastNonNullIndex})`);
   
   // Click the link for this month
   const clicked = await page.evaluate((index) => {
@@ -422,8 +468,30 @@ async function main() {
   const username = requireEnv('USERNAME');
   const password = requireEnv('PASSWORD');
 
-  const args = new Set(process.argv.slice(2));
+  const rawArgs = process.argv.slice(2);
+  const args = new Set(rawArgs);
   const dbMode = args.has('--db') || args.has('db');
+
+  // Optional --year <YYYY> and --month <1-12> parameters
+  const yearArgIdx = rawArgs.indexOf('--year');
+  const targetYear = yearArgIdx !== -1 ? parseInt(rawArgs[yearArgIdx + 1], 10) : null;
+  const monthArgIdx = rawArgs.indexOf('--month');
+  const targetMonth = monthArgIdx !== -1 ? parseInt(rawArgs[monthArgIdx + 1], 10) : null; // 1-based (1=Jan, 12=Dec)
+
+  if (targetYear !== null) {
+    if (!Number.isFinite(targetYear) || targetYear < 2020 || targetYear > 2100) {
+      console.error('[main] Invalid --year value. Expected a 4-digit year, e.g. --year 2025');
+      process.exit(1);
+    }
+    console.log(`[main] Target year: ${targetYear}`);
+  }
+  if (targetMonth !== null) {
+    if (!Number.isFinite(targetMonth) || targetMonth < 1 || targetMonth > 12) {
+      console.error('[main] Invalid --month value. Expected 1-12, e.g. --month 3 for March');
+      process.exit(1);
+    }
+    console.log(`[main] Target month: ${targetMonth} (0-based index: ${targetMonth - 1})`);
+  }
 
   let browser;
   try {
@@ -448,12 +516,23 @@ async function main() {
     console.log('[main] Scraping monthly Wirkenergie...');
     const monthlyData = await scrapeMonthlyActiveEnergy(page);
 
+    // Select a specific year if requested (triggers AJAX postback & reloads grid)
+    if (targetYear !== null) {
+      await selectYear(page, targetYear);
+      // Re-scrape monthly data after year change so parsed values reflect the new year
+      console.log('[main] Re-scraping monthly Wirkenergie after year change...');
+      Object.assign(monthlyData, await scrapeMonthlyActiveEnergy(page));
+    }
+
     console.log('[main] Final parsed Wirkenergie object:');
     console.log(JSON.stringify(monthlyData.parsed, null, 2));
 
+    // Convert 1-based --month CLI arg to 0-based index (null when not provided)
+    const targetMonthIndex = targetMonth !== null ? targetMonth - 1 : null;
+
     // New feature: Scrape daily hourly usage
     console.log('\n[main] Starting daily hourly data scraping...');
-    const monthName = await findLatestNonNullMonthAndClick(page, monthlyData);
+    const monthName = await findLatestNonNullMonthAndClick(page, monthlyData, targetMonthIndex);
     
     if (monthName) {
       try {
