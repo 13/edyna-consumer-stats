@@ -1,13 +1,12 @@
 /**
  * Scheduler using node-cron
- * Runs the scraper with database mode daily at 12:00
  */
 
 require('dotenv').config();
 const cron = require('node-cron');
 const { spawn } = require('child_process');
 
-const CRON_SCHEDULE = process.env.CRON_SCHEDULE || '0 12 * * *'; // Default: 12:00 daily
+const CRON_SCHEDULE = process.env.CRON_SCHEDULE || '0 10 * * *'; // Default: 10:00 daily
 
 console.log(`[scheduler] Starting with schedule: ${CRON_SCHEDULE}`);
 console.log('[scheduler] Waiting for scheduled time...');

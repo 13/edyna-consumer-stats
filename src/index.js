@@ -407,7 +407,10 @@ async function scrapeDailyHourlyUsage(page, monthName = null) {
   
   if (result.days.length > 0) {
     const sampleDay = result.days[0];
-    console.log(`[daily] Sample day ${sampleDay.date}: 00:00=${sampleDay.hours['00:00']}, 01:00=${sampleDay.hours['01:00']}, ... total_kwh=${sampleDay.total_kwh}`);
+    console.log(`[daily] Day ${sampleDay.date}: 00:00=${sampleDay.hours['00:00']}, 01:00=${sampleDay.hours['01:00']}, ... total_kwh=${sampleDay.total_kwh}`);
+    result.days.forEach(day => {
+      console.log(`[daily] ${day.date} - total_kwh=${day.total_kwh}`);
+    });
   }
   
   return result;
@@ -457,8 +460,7 @@ async function main() {
         const dailyData = await scrapeDailyHourlyUsage(page, monthName);
         
         if (dailyData && dailyData.days.length > 0) {
-          console.log('[main] Daily hourly data summary:');
-          console.log(`  Total days: ${dailyData.days.length}`);
+          console.log(`[main] Daily hourly days: ${dailyData.days.length}`);
           
           // Save to database if in DB mode
           if (dbMode) {
