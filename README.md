@@ -2,155 +2,138 @@
 
 Scrape consumer statistics from the Edyna distributor portal and store them in PostgreSQL/TimescaleDB.
 
-## Prerequisites
-- Node.js 20+ and npm (or Docker)
-- If the site requires authentication, provide credentials in .env (see below)
-
 ## Quick start (local)
-1. Copy .env.example to .env and edit variables.
-2. Install:
+
+1. Copy `.env.example` to `.env` and fill in your credentials.
+2. Install dependencies:
    ```bash
    npm install
    ```
-3. Run one-time scrape:
+3. One-time scrape (no database):
+   ```bash
+   npm start
+   ```
+4. Scrape and save to database:
    ```bash
    npm run start:db
    ```
 
-## Using Docker
+## CLI options
 
-The easiest way to run this project is with Docker Compose:
-- Uses `node:20-alpine` for a lightweight image
-- Uses `node-cron` for scheduling (runs daily at 12:00 by default)
-- Connects to your external PostgreSQL/TimescaleDB database
+```bash
+node src/index.js [--db] [--year YYYY] [--month 1-12]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--db` | Save results to the configured database |
+| `--year YYYY` | Scrape a specific year (default: current year shown in portal) |
+| `--month 1-12` | Scrape a specific month (1 = Jan … 12 = Dec) |
+
+## Docker
+
+The recommended way to run this project is with Docker Compose. The container runs the cron scheduler (`src/scheduler.js`) which handles automatic daily scraping.
 
 ### Setup
 
-1. Copy `.env.example` to `.env` and configure:
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Edit `.env` with your credentials:
-   ```
-   LOGIN_URL=https://portaledistributore.edyna.net/...
-   USERNAME=your_username
-   PASSWORD=your_password
-   DB_HOST=your_database_host
-   DB_USER=your_db_user
-   DB_PASSWORD=your_db_password
-   ```
-
-3. Start the container:
-   ```bash
-   docker-compose up -d --build
-   ```
-
-4. View logs:
-   ```bash
-   docker-compose logs -f edyna-scraper
-   ```
-
-### Cron Schedule
-The scraper runs automatically every day at **12:00** (noon). You can customize the schedule via environment variable:
-```
-CRON_SCHEDULE=0 12 * * *  # Default: daily at 12:00
-TZ=Europe/Rome            # Timezone
-RUN_ON_START=false        # Set to true to run immediately on container start
+```bash
+cp .env.example .env
+# Edit .env with your credentials
+docker-compose up -d --build
+docker-compose logs -f edyna-scraper
 ```
 
-### Manual Run
-To run the scraper manually inside the container:
+### Manual run inside container
+
 ```bash
 docker-compose exec edyna-scraper node src/index.js --db
 ```
 
-## Features
+## Environment variables
 
-### Monthly Data Scraping
-Scrapes monthly active energy (kWh) values from the Edyna portal's "Stundenprofil" (hourly profile) view.
+All variables are validated at startup — missing required values will print a clear error and exit immediately.
 
-### Daily Hourly Data Scraping
-After scraping monthly data, the tool automatically:
-1. Identifies the most recent month with non-null data
-2. Clicks on that month to open the daily view
-3. Extracts hourly kWh usage for each day (24-hour breakdown)
-4. Saves the data to TimescaleDB database
+### Required
 
-#### Daily Data Output
-The daily data is structured as:
-```json
-{
-  "year": 2025,
-  "month": "Novembre",
-  "days": [
-    {
-      "date": "01/11/2025",
-      "hours": {
-        "00:00": 0.45,
-        "01:00": 0.31,
-        ...
-        "23:00": 0.52
-      },
-      "total_kwh": 12.34
-    }
-  ]
-}
+| Variable | Description |
+|----------|-------------|
+| `LOGIN_URL` | Full Edyna portal login URL |
+| `USERNAME` | Portal username |
+| `PASSWORD` | Portal password |
+
+### Database (required when using `--db`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_HOST` | `localhost` | PostgreSQL host |
+| `DB_PORT` | `5432` | PostgreSQL port |
+| `DB_NAME` | `edyna` | Database name |
+| `DB_USER` | — | Database user |
+| `DB_PASSWORD` | — | Database password |
+| `DB_SSL` | `false` | Enable SSL |
+| `DB_SSL_REJECT_UNAUTHORIZED` | `true` | Verify SSL certificate |
+
+### Scheduler
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CRON_SCHEDULE` | `0 9 * * *` | Cron expression for daily run |
+| `TZ` | `Europe/Rome` | Timezone for cron |
+| `RUN_ON_START` | `false` | Run immediately on container start |
+
+### Behaviour
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HEADLESS` | `true` | Run browser headlessly |
+| `DEBUG_SHOTS` | `false` | Save screenshots on scrape errors |
+| `SCRAPE_RETRIES` | `3` | Max attempts before giving up |
+| `SCRAPE_RETRY_DELAY_MS` | `10000` | Base delay between retries (ms); multiplied per attempt |
+| `LOG_LEVEL` | `info` | Pino log level: `debug`, `info`, `warn`, `error` |
+
+## Retry behaviour
+
+The scraper retries the full browser session on failure (network errors, portal timeouts, etc.). With the defaults it makes up to 3 attempts with delays of 10 s, 20 s, and 30 s between them. Tune via `SCRAPE_RETRIES` and `SCRAPE_RETRY_DELAY_MS`.
+
+## Logging
+
+Logs are emitted as JSON via [pino](https://getpino.io). To get human-readable output locally:
+
+```bash
+npm install -g pino-pretty
+node src/index.js --db | pino-pretty
 ```
 
-### TimescaleDB Integration
-The tool saves scraped data directly to a PostgreSQL/TimescaleDB database.
+In Docker, the raw JSON is suitable for log aggregators (Loki, Datadog, etc.).
 
-#### Database Setup (without Docker)
-1. Create a PostgreSQL/TimescaleDB database
-2. Configure database credentials in `.env`:
-   ```
-   DB_HOST=localhost
-   DB_PORT=5432
-   DB_NAME=edyna
-   DB_USER=your_user
-   DB_PASSWORD=your_password
-   DB_SSL=false
-   ```
+## Scheduler
 
-3. Run with database mode:
-   ```bash
-   npm run start:db
-   ```
+Two cron jobs run automatically:
 
-The tool will:
-- Automatically create the required schema and tables
-- Create a TimescaleDB hypertable (if TimescaleDB extension is available)
-- Insert new hourly consumption data
-- **Update existing values if the new value is higher** (overwrite logic)
+- **Daily run** — configurable via `CRON_SCHEDULE` (default: 09:00)
+- **Monthly backfill** — runs on the 3rd and 10th of each month at 23:00, scraping the previous full calendar month
 
-#### Database Schema
+## Database schema
+
 ```sql
 CREATE TABLE edyna_hourly (
-  timestamp TIMESTAMPTZ NOT NULL PRIMARY KEY,
-  kwh DOUBLE PRECISION NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
+  timestamp  TIMESTAMPTZ      NOT NULL PRIMARY KEY,
+  kwh        DOUBLE PRECISION NOT NULL,
+  created_at TIMESTAMPTZ      DEFAULT NOW(),
+  updated_at TIMESTAMPTZ      DEFAULT NOW()
 );
 ```
 
-#### Environment Variables
-- `LOGIN_URL`: Edyna portal login URL
-- `USERNAME`: Portal username
-- `PASSWORD`: Portal password
-- `DEBUG_SHOTS`: Set to `true` to save screenshots on errors
-- `HEADLESS`: Set to `false` to see browser automation (default: `true`)
-- `DB_HOST`: Database host (default: `localhost`, use `db` for Docker)
-- `DB_PORT`: Database port (default: `5432`)
-- `DB_NAME`: Database name (default: `edyna`)
-- `DB_USER`: Database user (required for DB mode)
-- `DB_PASSWORD`: Database password (required for DB mode)
-- `DB_SSL`: Enable SSL connection (default: `false`)
+If the TimescaleDB extension is available, the table is automatically converted to a hypertable. Falls back to a regular table otherwise.
+
+Existing records are updated only if the new value is higher (tolerance: 0.001 kWh).
 
 ## TODO
 
-- [x] Add PostgreSQL/TimescaleDB integration
-- [x] Add Docker/docker-compose
-- [x] Add Cron for scheduled scraping
-- [ ] Add unit/integration tests and CI pipeline
-
+- [x] PostgreSQL/TimescaleDB integration
+- [x] Docker / docker-compose
+- [x] Cron scheduler
+- [x] Retry logic with exponential backoff
+- [x] Zod env validation
+- [x] Structured logging (pino)
+- [ ] Unit/integration tests and CI pipeline

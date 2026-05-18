@@ -8,280 +8,234 @@
  *  - Scrape daily hourly kWh usage (24-hour breakdown per day)
  *  - Save to TimescaleDB database (--db flag)
  *
- * ENV:
- *   LOGIN_URL        - Full login URL (with ReturnUrl)
- *   USERNAME         - Portal username
- *   PASSWORD         - Portal password
- *   HEADLESS         - "true" | "false" (default true)
- *   DEBUG_SHOTS      - "true" screenshots on failure
- *   DB_HOST          - Database host (default: localhost)
- *   DB_PORT          - Database port (default: 5432)
- *   DB_NAME          - Database name (default: edyna)
- *   DB_USER          - Database user (required for --db mode)
- *   DB_PASSWORD      - Database password (required for --db mode)
- *   DB_SSL           - Enable SSL (default: false)
+ * ENV: see src/config.js for full list
  *
  * Usage:
- *   npm start                        - Scrape only (no database), latest month
- *   npm run start:db                 - Scrape and save to database, latest month
- *   node src/index.js --year 2025               - Scrape specific year
- *   node src/index.js --month 3                 - Scrape specific month (1=Jan … 12=Dec)
- *   node src/index.js --year 2025 --month 3     - Scrape March 2025
- *   node src/index.js --db --year 2025 --month 3 - Above + save to database
- *
- * Improvements (per request):
- *   After clicking "Verbraucher" we now:
- *     1. Perform an initial idle wait.
- *     2. Run a polling loop (retry) until key selectors appear.
- *     3. Apply an additional fixed delay (configurable).
- *
- * Key selectors considered loaded:
- *   - Tab container: #body_ctl00_ctl00_tcListUtenze
- *   - Consumer table: #body_ctl00_ctl00_tcListUtenze_TList_cUFListUtenze_gvUtenze
- *
- * If still absent after retries, we proceed but warn.
+ *   npm start                                          - Scrape only (no database), latest month
+ *   npm run start:db                                   - Scrape and save to database, latest month
+ *   node src/index.js --year 2025                      - Scrape specific year
+ *   node src/index.js --month 3                        - Scrape specific month (1=Jan … 12=Dec)
+ *   node src/index.js --year 2025 --month 3            - Scrape March 2025
+ *   node src/index.js --db --year 2025 --month 3       - Above + save to database
  */
 
-require('dotenv').config();
 const puppeteer = require('puppeteer');
+const config = require('./config');
+const log = require('./logger');
 const db = require('./db');
 
-/* ---------- Utilities ---------- */
-function requireEnv(name) {
-  const v = process.env[name];
-  if (!v) {
-    console.error(`Missing required env variable: ${name}`);
-    process.exit(1);
-  }
-  return v;
-}
+/* ---------- Selectors ---------- */
+const SELECTORS = {
+  loginUser:      '#body_body_cLogin_txtUser',
+  loginPassword:  '#body_body_cLogin_txtPassword',
+  loginBtn:       '#body_body_cLogin_btnLogin',
+  loginPanel:     '#body_body_cLogin_pnlLogin',
+  menuVerbraucher:'#body_ctl00_mMenu1_FirstLevelMenuRepeater_lnkLevelMenu_0',
+  tabContainer:   '#body_ctl00_ctl00_tcListUtenze',
+  consumerTable:  '#body_ctl00_ctl00_tcListUtenze_TList_cUFListUtenze_gvUtenze',
+  curveBtn:       '#body_ctl00_ctl00_tcListUtenze_TList_cUFListUtenze_gvUtenze_btnCurve_0',
+  yearDropdown:   '#body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_ddlAnno',
+  energyGrid:     '#body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_gvCurveAttiva',
+  // Prefix for ID-attribute matching inside page.evaluate()
+  monthBtnPrefix: 'body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_gvCurveAttiva_btnCurve',
+};
 
+const HOURS_PER_DAY = 24;
+
+/* ---------- Utilities ---------- */
 function sleep(ms) {
   return new Promise(res => setTimeout(res, ms));
 }
 
-// Helper to normalize numeric strings (handles localized formatting)
 function normalizeNumber(str) {
   if (!str || str === '' || str === '-' || str === 'N/A') return null;
   const normalized = str
-    .replace(/\./g, '')    // remove thousand separators
-    .replace(',', '.')     // decimal comma -> dot
-    .replace(/[^\d.-]/g, ''); // remove stray chars
+    .replace(/\./g, '')
+    .replace(',', '.')
+    .replace(/[^\d.-]/g, '');
   const num = normalized ? parseFloat(normalized) : null;
   return Number.isFinite(num) ? num : null;
 }
 
-// Constants
-const HOURS_PER_DAY = 24;
+async function withRetry(fn, { maxAttempts = 3, baseDelay = 10000, label = 'operation' } = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        const wait = baseDelay * attempt;
+        log.warn({ attempt, maxAttempts, waitMs: wait }, `[${label}] failed, retrying: ${err.message}`);
+        await sleep(wait);
+      }
+    }
+  }
+  throw lastErr;
+}
 
+/* ---------- Browser ---------- */
 async function launchBrowser() {
-  const headlessEnv = process.env.HEADLESS;
-  const headless = headlessEnv ? headlessEnv === 'true' : true;
   return puppeteer.launch({
-    headless,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage'
-    ],
-    defaultViewport: { width: 1400, height: 900 }
+    headless: config.HEADLESS,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    defaultViewport: { width: 1400, height: 900 },
   });
 }
 
-/* ---------- Login Flow ---------- */
+/* ---------- Login ---------- */
 async function performLogin(page, { loginUrl, username, password }) {
-  console.log('[login] Opening login URL:', loginUrl);
+  log.info({ loginUrl }, '[login] Opening login URL');
   await page.goto(loginUrl, { waitUntil: 'domcontentloaded' });
 
-  await page.waitForSelector('#body_body_cLogin_txtUser', { timeout: 5000 });
-  await page.waitForSelector('#body_body_cLogin_txtPassword', { timeout: 5000 });
-  await page.waitForSelector('#body_body_cLogin_btnLogin', { timeout: 5000 });
+  await page.waitForSelector(SELECTORS.loginUser,     { timeout: 5000 });
+  await page.waitForSelector(SELECTORS.loginPassword, { timeout: 5000 });
+  await page.waitForSelector(SELECTORS.loginBtn,      { timeout: 5000 });
 
-  console.log('[login] Filling username...');
-  await page.click('#body_body_cLogin_txtUser', { clickCount: 3 });
-  await page.type('#body_body_cLogin_txtUser', username, { delay: 35 });
+  log.info('[login] Filling credentials');
+  await page.click(SELECTORS.loginUser, { clickCount: 3 });
+  await page.type(SELECTORS.loginUser, username, { delay: 35 });
+  await page.click(SELECTORS.loginPassword, { clickCount: 3 });
+  await page.type(SELECTORS.loginPassword, password, { delay: 40 });
 
-  console.log('[login] Filling password...');
-  await page.click('#body_body_cLogin_txtPassword', { clickCount: 3 });
-  await page.type('#body_body_cLogin_txtPassword', password, { delay: 40 });
-
-  console.log('[login] Submitting...');
+  log.info('[login] Submitting');
   const beforeUrl = page.url();
-  await page.click('#body_body_cLogin_btnLogin');
+  await page.click(SELECTORS.loginBtn);
 
   await Promise.race([
     page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
-    //sleep(4000)
   ]);
-  //await sleep(1000);
 
   const afterUrl = page.url();
-  const loginPanelExists = await page.$('#body_body_cLogin_pnlLogin') !== null;
+  const loginPanelExists = await page.$(SELECTORS.loginPanel) !== null;
   const success = !loginPanelExists || (afterUrl !== beforeUrl && !afterUrl.includes('Login.tws'));
 
   if (!success) {
-    if (process.env.DEBUG_SHOTS === 'true') {
+    if (config.DEBUG_SHOTS) {
       await page.screenshot({ path: 'login_failure.png', fullPage: true });
-      console.log('[login] Screenshot saved: login_failure.png');
+      log.info('[login] Screenshot saved: login_failure.png');
     }
     throw new Error('Login not confirmed as successful.');
   }
-  console.log('[login] Login successful (heuristic). Current URL:', afterUrl);
+  log.info({ afterUrl }, '[login] Login successful');
 }
 
 /* ---------- Generic idle wait ---------- */
 async function waitForIdle(page, { timeout = 20000 } = {}) {
   await Promise.race([
     page.waitForNavigation({ waitUntil: 'networkidle2', timeout }).catch(() => {}),
-    //sleep(2500)
   ]);
 }
 
-/* ---------- Click Verbraucher with extended wait ---------- */
+/* ---------- Click Verbraucher ---------- */
 async function clickVerbraucher(page) {
-  const MENU_SELECTOR = '#body_ctl00_mMenu1_FirstLevelMenuRepeater_lnkLevelMenu_0';
-  const TAB_CONTAINER = '#body_ctl00_ctl00_tcListUtenze';
-  const TABLE_SELECTOR = '#body_ctl00_ctl00_tcListUtenze_TList_cUFListUtenze_gvUtenze';
-
-  console.log('[verbraucher] Waiting for menu item...');
-  await page.waitForSelector(MENU_SELECTOR, { timeout: 25000 });
+  log.info('[verbraucher] Waiting for menu item');
+  await page.waitForSelector(SELECTORS.menuVerbraucher, { timeout: 25000 });
 
   const beforeUrl = page.url();
-  console.log('[verbraucher] Clicking "Verbraucher"...');
-  await page.click(MENU_SELECTOR);
-
-  // Initial idle wait
+  await page.click(SELECTORS.menuVerbraucher);
   await waitForIdle(page, { timeout: 30000 });
 
-  const afterUrl = page.url();
-  console.log('[verbraucher] Post-click URL changed?', beforeUrl !== afterUrl);
-
-  // Final presence checks
-  const tabExists = await page.$(TAB_CONTAINER) !== null;
-  const tableExists = await page.$(TABLE_SELECTOR) !== null;
-  console.log(`[verbraucher] Tab container present: ${tabExists}, consumer table present: ${tableExists}`);
+  const tabExists   = await page.$(SELECTORS.tabContainer)   !== null;
+  const tableExists = await page.$(SELECTORS.consumerTable)  !== null;
+  log.info({ tabExists, tableExists, urlChanged: page.url() !== beforeUrl }, '[verbraucher] Post-click state');
 
   if (!tabExists && !tableExists) {
-    console.warn('[verbraucher] Verbraucher content still not detected; proceeding cautiously.');
+    log.warn('[verbraucher] Content not detected; proceeding cautiously');
   }
 }
 
 /* ---------- Click first curve button ---------- */
 async function clickFirstCurve(page) {
-  const CURVE_BTN_ID = '#body_ctl00_ctl00_tcListUtenze_TList_cUFListUtenze_gvUtenze_btnCurve_0';
-  console.log('[curve] Waiting for first curve button...');
+  log.info('[curve] Waiting for curve button');
   try {
-    await page.waitForSelector(CURVE_BTN_ID, { timeout: 360000 });
+    await page.waitForSelector(SELECTORS.curveBtn, { timeout: 360000 });
   } catch {
-    console.warn('[curve] Curve button not found within extended timeout. Attempting fallback detection of curve tab...');
+    log.warn('[curve] Curve button not found within timeout, attempting fallback');
     return;
   }
 
-  const beforeUrl = page.url();
-  console.log('[curve] Clicking first curve button...');
-  await page.click(CURVE_BTN_ID);
-
+  await page.click(SELECTORS.curveBtn);
   await waitForIdle(page, { timeout: 360000 });
-  //await sleep(2000);
-
-  const afterUrl = page.url();
-  console.log('[curve] URL changed?', beforeUrl !== afterUrl);
 }
 
-/* ---------- Select year in ddlAnno dropdown ---------- */
+/* ---------- Select year ---------- */
 async function selectYear(page, year) {
-  const SELECT_ID = '#body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_ddlAnno';
-  console.log(`[year] Waiting for year dropdown...`);
-  await page.waitForSelector(SELECT_ID, { timeout: 60000 }).catch(() => {
+  log.info('[year] Waiting for year dropdown');
+  await page.waitForSelector(SELECTORS.yearDropdown, { timeout: 60000 }).catch(() => {
     throw new Error('Year dropdown (ddlAnno) not found.');
   });
 
   const available = await page.evaluate((sel) => {
     const el = document.querySelector(sel);
-    if (!el) return [];
-    return Array.from(el.options).map(o => o.value);
-  }, SELECT_ID);
+    return el ? Array.from(el.options).map(o => o.value) : [];
+  }, SELECTORS.yearDropdown);
 
   if (!available.includes(String(year))) {
-    throw new Error(`Year ${year} is not available in the dropdown. Available: ${available.join(', ')}`);
+    throw new Error(`Year ${year} not available. Available: ${available.join(', ')}`);
   }
 
-  console.log(`[year] Selecting year: ${year}`);
-  await page.select(SELECT_ID, String(year));
-
-  // The select has an onchange postback — wait for the page to settle
+  log.info({ year }, '[year] Selecting year');
+  await page.select(SELECTORS.yearDropdown, String(year));
   await waitForIdle(page, { timeout: 60000 });
-  console.log(`[year] Year ${year} selected and page reloaded.`);
+  log.info({ year }, '[year] Year selected');
 }
 
 /* ---------- Scrape monthly active energy ---------- */
 async function scrapeMonthlyActiveEnergy(page) {
-  const GRID_SELECTOR = '#body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_gvCurveAttiva';
-  console.log('[scrape] Waiting for active energy grid...');
-  await page.waitForSelector(GRID_SELECTOR, { timeout: 360000 }).catch(() => {
+  log.info('[scrape] Waiting for energy grid');
+  await page.waitForSelector(SELECTORS.energyGrid, { timeout: 360000 }).catch(() => {
     throw new Error('Active energy grid not found after extended wait.');
   });
 
-  const data = await page.evaluate(() => {
-    const grid = document.querySelector('#body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_gvCurveAttiva');
+  const data = await page.evaluate((gridSel, btnPrefix) => {
+    const grid = document.querySelector(gridSel);
     if (!grid) return { months: [], values: [], map: {} };
 
-    const headerCells = Array.from(grid.querySelectorAll('tr:first-child th'));
-    const monthNames = headerCells.map(th => th.innerText.trim());
+    const monthNames = Array.from(grid.querySelectorAll('tr:first-child th'))
+      .map(th => th.innerText.trim());
 
     const anchorNodes = Array.from(
-      grid.querySelectorAll('tr:nth-child(2) a[id^="body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_gvCurveAttiva_btnCurve"]')
+      grid.querySelectorAll(`tr:nth-child(2) a[id^="${btnPrefix}"]`)
     );
 
     const rawValues = anchorNodes.map(a => a.innerText.replace(/\s*<i.*$/i, '').trim());
     const map = {};
-    monthNames.forEach((m, i) => {
-      map[m] = rawValues[i] || '';
-    });
+    monthNames.forEach((m, i) => { map[m] = rawValues[i] || ''; });
 
     return { months: monthNames, values: rawValues, map };
-  });
+  }, SELECTORS.energyGrid, SELECTORS.monthBtnPrefix);
 
   const parsed = {};
   for (const [month, raw] of Object.entries(data.map)) {
     parsed[month] = normalizeNumber(raw);
   }
 
-  /*console.log('[scrape] Wirkenergie (kWh) per month:');
-  Object.entries(parsed).forEach(([m, v]) => {
-    console.log(`  ${m}: ${v === null ? '(blank)' : v}`);
-  });*/
-
   return { raw: data.map, parsed, months: data.months };
 }
 
 /* ---------- Find latest non-null month and click ---------- */
 /**
- * @param {object} page          - Puppeteer page
- * @param {object} monthsData    - { months, parsed } from scrapeMonthlyActiveEnergy
- * @param {number|null} targetMonthIndex - 0-based month index (0=Jan … 11=Dec).
- *                                         When null, auto-selects the latest non-null month.
+ * @param {object} page
+ * @param {object} monthsData    - { months, parsed }
+ * @param {number|null} targetMonthIndex - 0-based; null = auto-select latest non-null
  */
 async function findLatestNonNullMonthAndClick(page, monthsData, targetMonthIndex = null) {
   let lastNonNullMonth = null;
   let lastNonNullIndex = -1;
 
   if (targetMonthIndex !== null) {
-    // Use the explicitly requested month index
     if (targetMonthIndex < 0 || targetMonthIndex >= monthsData.months.length) {
-      console.log(`[daily] Requested month index ${targetMonthIndex} is out of range (0–${monthsData.months.length - 1}). Skipping.`);
+      log.warn({ targetMonthIndex }, '[daily] Requested month index out of range');
       return false;
     }
     lastNonNullIndex = targetMonthIndex;
     lastNonNullMonth = monthsData.months[targetMonthIndex];
-    console.log(`[daily] Using requested month: ${lastNonNullMonth} (index ${lastNonNullIndex})`);
+    log.info({ month: lastNonNullMonth, index: lastNonNullIndex }, '[daily] Using requested month');
   } else {
-    console.log('[daily] Finding latest non-null month...');
-    // Find the last month with non-null data
     for (let i = monthsData.months.length - 1; i >= 0; i--) {
       const monthName = monthsData.months[i];
-      const value = monthsData.parsed[monthName];
-      if (value !== null && value !== undefined) {
+      if (monthsData.parsed[monthName] != null) {
         lastNonNullMonth = monthName;
         lastNonNullIndex = i;
         break;
@@ -290,295 +244,204 @@ async function findLatestNonNullMonthAndClick(page, monthsData, targetMonthIndex
   }
 
   if (lastNonNullMonth === null) {
-    console.log('[daily] No non-null month found, skipping daily view navigation.');
+    log.info('[daily] No non-null month found, skipping daily view');
     return false;
   }
 
-  console.log(`[daily] Target month: ${lastNonNullMonth} (index ${lastNonNullIndex})`);
-  
-  // Click the link for this month
-  const clicked = await page.evaluate((index) => {
-    const grid = document.querySelector('#body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_gvCurveAttiva');
+  log.info({ month: lastNonNullMonth, index: lastNonNullIndex }, '[daily] Target month');
+
+  const clicked = await page.evaluate((gridSel, btnPrefix, index) => {
+    const grid = document.querySelector(gridSel);
     if (!grid) return false;
-    
-    const anchorNodes = Array.from(
-      grid.querySelectorAll('tr:nth-child(2) a[id^="body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_gvCurveAttiva_btnCurve"]')
-    );
-    
-    if (index < 0 || index >= anchorNodes.length) return false;
-    
-    const link = anchorNodes[index];
-    link.click();
+    const anchors = Array.from(grid.querySelectorAll(`tr:nth-child(2) a[id^="${btnPrefix}"]`));
+    if (index < 0 || index >= anchors.length) return false;
+    anchors[index].click();
     return true;
-  }, lastNonNullIndex);
-  
+  }, SELECTORS.energyGrid, SELECTORS.monthBtnPrefix, lastNonNullIndex);
+
   if (!clicked) {
-    console.log('[daily] Failed to click monthly view link.');
+    log.warn('[daily] Failed to click monthly view link');
     return false;
   }
-  
-  console.log(`[daily] Navigating to monthly view for: ${lastNonNullMonth}`);
+
+  log.info({ month: lastNonNullMonth }, '[daily] Navigating to monthly view');
   await waitForIdle(page, { timeout: 360000 });
-  
+
   return lastNonNullMonth;
 }
 
 /* ---------- Scrape daily hourly usage ---------- */
 async function scrapeDailyHourlyUsage(page, monthName = null) {
-  console.log('[daily] Parsing daily hourly data...');
-  
-  // Try multiple selector strategies to find the hourly data table
+  log.info('[daily] Parsing daily hourly data');
+
   const data = await page.evaluate(() => {
-    // Strategy 1: Look for tables with ID containing 'gvDettaglio' or similar
     let table = document.querySelector('table[id*="gvDettaglio"]');
-    
-    // Strategy 2: Look for tables with ID containing 'Consumi' or 'Giornalier'
+    if (!table) table = document.querySelector('table[id*="Consumi"]');
+    if (!table) table = document.querySelector('table[id*="Giornalier"]');
     if (!table) {
-      table = document.querySelector('table[id*="Consumi"]');
-    }
-    if (!table) {
-      table = document.querySelector('table[id*="Giornalier"]');
-    }
-    
-    // Strategy 3: Look for tables with many columns (hourly data typically has 24+ columns)
-    if (!table) {
-      const tables = Array.from(document.querySelectorAll('table'));
-      for (const t of tables) {
-        const headerRow = t.querySelector('tr:first-child');
-        if (headerRow) {
-          const headers = Array.from(headerRow.querySelectorAll('th'));
-          if (headers.length >= 24) {
-            table = t;
-            break;
-          }
-        }
+      for (const t of document.querySelectorAll('table')) {
+        const headers = t.querySelectorAll('tr:first-child th');
+        if (headers.length >= 24) { table = t; break; }
       }
     }
-    
-    if (!table) {
-      return { error: 'No suitable table found with hourly data' };
-    }
-    
+    if (!table) return { error: 'No suitable table found with hourly data' };
+
     const rows = Array.from(table.querySelectorAll('tr'));
-    if (rows.length < 2) {
-      return { error: 'Table has insufficient rows' };
-    }
-    
-    // Parse headers (first row should have hour labels or column headers)
-    const headerRow = rows[0];
-    const headers = Array.from(headerRow.querySelectorAll('th, td')).map(cell => 
-      cell.innerText.trim()
-    );
-    
-    // Parse data rows (each row should be a day with hourly values)
+    if (rows.length < 2) return { error: 'Table has insufficient rows' };
+
+    const headers = Array.from(rows[0].querySelectorAll('th, td')).map(c => c.innerText.trim());
+
     const days = [];
     for (let i = 1; i < rows.length; i++) {
-      const row = rows[i];
-      const cells = Array.from(row.querySelectorAll('td'));
-      if (cells.length === 0) continue;
-      
-      // First cell is typically the date
-      const dateCell = cells[0].innerText.trim();
-      
-      // Remaining cells are hourly values
-      const hourlyValues = [];
-      for (let j = 1; j < cells.length; j++) {
-        const value = cells[j].innerText.trim();
-        hourlyValues.push(value);
-      }
-      
+      const cells = Array.from(rows[i].querySelectorAll('td'));
+      if (!cells.length) continue;
       days.push({
-        dateCell,
-        hourlyValues
+        dateCell: cells[0].innerText.trim(),
+        hourlyValues: cells.slice(1).map(c => c.innerText.trim()),
       });
     }
-    
+
     return { headers, days, tableId: table.id };
   });
-  
+
   if (data.error) {
-    console.log(`[daily] Error: ${data.error}`);
+    log.warn({ error: data.error }, '[daily] Could not find hourly table');
     return null;
   }
-  
-  console.log(`[daily] Found table with ID: ${data.tableId || 'unknown'}`);
-  console.log(`[daily] Headers: ${data.headers.length} columns`);
-  console.log(`[daily] Scraped ${data.days.length} days with hourly data.`);
-  
-  // Try to extract year from the first day's date cell, or use current year as fallback
+
+  log.info({ tableId: data.tableId, columns: data.headers.length, days: data.days.length }, '[daily] Found hourly table');
+
   let year = new Date().getFullYear();
-  if (data.days.length > 0 && data.days[0].dateCell) {
-    // Try to parse year from date cell (common formats: DD/MM/YYYY, DD.MM.YYYY, etc.)
+  if (data.days.length > 0) {
     const yearMatch = data.days[0].dateCell.match(/\d{4}/);
-    if (yearMatch) {
-      year = parseInt(yearMatch[0], 10);
-    }
+    if (yearMatch) year = parseInt(yearMatch[0], 10);
   }
-  
-  // Process and structure the data
-  const result = {
-    year: year,
-    month: monthName, // Month name passed from context
-    days: []
-  };
-  
-  // Parse each day
+
+  const result = { year, month: monthName, days: [] };
+
   for (const dayData of data.days) {
     const hours = {};
     let totalKwh = 0;
     let validValues = 0;
-    
-    // Map hourly values into a nested hours object
-    // Generate hour labels 00:00 through 23:00
+
     for (let h = 0; h < Math.min(HOURS_PER_DAY, dayData.hourlyValues.length); h++) {
       const hourLabel = `${String(h).padStart(2, '0')}:00`;
       const value = normalizeNumber(dayData.hourlyValues[h]);
       hours[hourLabel] = value;
-      
-      if (value !== null) {
-        totalKwh += value;
-        validValues++;
-      }
+      if (value !== null) { totalKwh += value; validValues++; }
     }
-    
-    // If there are valid hourly values, add this day
+
     if (validValues > 0) {
-      result.days.push({
-        date: dayData.dateCell,
-        hours,
-        total_kwh: parseFloat(totalKwh.toFixed(3))
-      });
+      result.days.push({ date: dayData.dateCell, hours, total_kwh: parseFloat(totalKwh.toFixed(3)) });
     }
   }
-  
+
   if (result.days.length > 0) {
-    const sampleDay = result.days[0];
-    console.log(`[daily] Day ${sampleDay.date}: 00:00=${sampleDay.hours['00:00']}, 01:00=${sampleDay.hours['01:00']}, ... total_kwh=${sampleDay.total_kwh}`);
-    result.days.forEach(day => {
-      console.log(`[daily] ${day.date} - total_kwh=${day.total_kwh}`);
-    });
+    result.days.forEach(day => log.debug({ date: day.date, total_kwh: day.total_kwh }, '[daily]'));
   }
-  
+
   return result;
 }
 
-/* ---------- Main ---------- */
-async function main() {
-  const loginUrl = requireEnv('LOGIN_URL');
-  const username = requireEnv('USERNAME');
-  const password = requireEnv('PASSWORD');
+/* ---------- Scrape session (what gets retried) ---------- */
+async function scrapeSession({ loginUrl, username, password, dbMode, targetYear, targetMonthIndex }) {
+  let browser;
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage();
 
+    await performLogin(page, { loginUrl, username, password });
+    await clickVerbraucher(page);
+    await clickFirstCurve(page);
+
+    let monthlyData = await scrapeMonthlyActiveEnergy(page);
+
+    if (targetYear !== null) {
+      await selectYear(page, targetYear);
+      Object.assign(monthlyData, await scrapeMonthlyActiveEnergy(page));
+    }
+
+    log.info({ parsed: monthlyData.parsed }, '[main] Monthly Wirkenergie');
+
+    const monthName = await findLatestNonNullMonthAndClick(page, monthlyData, targetMonthIndex);
+    if (monthName) {
+      const dailyData = await scrapeDailyHourlyUsage(page, monthName);
+
+      if (dailyData && dailyData.days.length > 0) {
+        log.info({ days: dailyData.days.length }, '[main] Daily hourly data scraped');
+        if (dbMode) {
+          log.info('[main] Saving to database');
+          await db.saveDailyHourlyData(dailyData);
+        }
+      } else {
+        log.warn('[main] No daily hourly data found');
+      }
+    }
+  } catch (err) {
+    if (browser && config.DEBUG_SHOTS) {
+      try {
+        const pages = await browser.pages();
+        if (pages[0]) {
+          await pages[0].screenshot({ path: 'error_scrape.png', fullPage: true });
+          log.info('[error] Saved screenshot: error_scrape.png');
+        }
+      } catch {}
+    }
+    throw err;
+  } finally {
+    if (browser) await browser.close();
+  }
+}
+
+/* ---------- Main ---------- */
+async function main({ year = null, month = null, dbMode = false } = {}) {
+  if (year !== null && (!Number.isFinite(year) || year < 2020 || year > 2100)) {
+    throw new Error(`Invalid year: ${year}. Expected a 4-digit year between 2020-2100.`);
+  }
+  if (month !== null && (!Number.isFinite(month) || month < 1 || month > 12)) {
+    throw new Error(`Invalid month: ${month}. Expected 1-12.`);
+  }
+
+  if (dbMode) {
+    log.info('[main] Database mode enabled');
+    await db.initializeSchema();
+  }
+
+  const targetMonthIndex = month !== null ? month - 1 : null;
+
+  try {
+    await withRetry(
+      () => scrapeSession({
+        loginUrl: config.LOGIN_URL,
+        username: config.USERNAME,
+        password: config.PASSWORD,
+        dbMode,
+        targetYear: year,
+        targetMonthIndex,
+      }),
+      { maxAttempts: config.SCRAPE_RETRIES, baseDelay: config.SCRAPE_RETRY_DELAY_MS, label: 'scraper' }
+    );
+    log.info('[main] Flow complete');
+  } finally {
+    if (dbMode) await db.closePool();
+  }
+}
+
+/* ---------- CLI entry point ---------- */
+if (require.main === module) {
   const rawArgs = process.argv.slice(2);
   const args = new Set(rawArgs);
   const dbMode = args.has('--db') || args.has('db');
 
-  // Optional --year <YYYY> and --month <1-12> parameters
-  const yearArgIdx = rawArgs.indexOf('--year');
-  const targetYear = yearArgIdx !== -1 ? parseInt(rawArgs[yearArgIdx + 1], 10) : null;
-  const monthArgIdx = rawArgs.indexOf('--month');
-  const targetMonth = monthArgIdx !== -1 ? parseInt(rawArgs[monthArgIdx + 1], 10) : null; // 1-based (1=Jan, 12=Dec)
+  const yearIdx  = rawArgs.indexOf('--year');
+  const monthIdx = rawArgs.indexOf('--month');
+  const year  = yearIdx  !== -1 ? parseInt(rawArgs[yearIdx  + 1], 10) : null;
+  const month = monthIdx !== -1 ? parseInt(rawArgs[monthIdx + 1], 10) : null;
 
-  if (targetYear !== null) {
-    if (!Number.isFinite(targetYear) || targetYear < 2020 || targetYear > 2100) {
-      console.error('[main] Invalid --year value. Expected a 4-digit year, e.g. --year 2025');
-      process.exit(1);
-    }
-    console.log(`[main] Target year: ${targetYear}`);
-  }
-  if (targetMonth !== null) {
-    if (!Number.isFinite(targetMonth) || targetMonth < 1 || targetMonth > 12) {
-      console.error('[main] Invalid --month value. Expected 1-12, e.g. --month 3 for March');
-      process.exit(1);
-    }
-    console.log(`[main] Target month: ${targetMonth} (0-based index: ${targetMonth - 1})`);
-  }
-
-  let browser;
-  try {
-    // Initialize database if in DB mode
-    if (dbMode) {
-      console.log('[main] Database mode enabled');
-      await db.initializeSchema();
-    }
-
-    browser = await launchBrowser();
-    const page = await browser.newPage();
-
-    console.log('[main] Starting login...');
-    await performLogin(page, { loginUrl, username, password });
-
-    console.log('[main] Clicking Verbraucher (extended wait)...');
-    await clickVerbraucher(page);
-
-    console.log('[main] Clicking first curve button...');
-    await clickFirstCurve(page);
-
-    console.log('[main] Scraping monthly Wirkenergie...');
-    const monthlyData = await scrapeMonthlyActiveEnergy(page);
-
-    // Select a specific year if requested (triggers AJAX postback & reloads grid)
-    if (targetYear !== null) {
-      await selectYear(page, targetYear);
-      // Re-scrape monthly data after year change so parsed values reflect the new year
-      console.log('[main] Re-scraping monthly Wirkenergie after year change...');
-      Object.assign(monthlyData, await scrapeMonthlyActiveEnergy(page));
-    }
-
-    console.log('[main] Final parsed Wirkenergie object:');
-    console.log(JSON.stringify(monthlyData.parsed, null, 2));
-
-    // Convert 1-based --month CLI arg to 0-based index (null when not provided)
-    const targetMonthIndex = targetMonth !== null ? targetMonth - 1 : null;
-
-    // New feature: Scrape daily hourly usage
-    console.log('\n[main] Starting daily hourly data scraping...');
-    const monthName = await findLatestNonNullMonthAndClick(page, monthlyData, targetMonthIndex);
-    
-    if (monthName) {
-      try {
-        const dailyData = await scrapeDailyHourlyUsage(page, monthName);
-        
-        if (dailyData && dailyData.days.length > 0) {
-          console.log(`[main] Daily hourly days: ${dailyData.days.length}`);
-          
-          // Save to database if in DB mode
-          if (dbMode) {
-            console.log('[main] Saving to database...');
-            await db.saveDailyHourlyData(dailyData);
-          }
-        } else {
-          console.log('[main] No daily hourly data found or parsed.');
-        }
-      } catch (e) {
-        console.error('[daily] Error scraping daily data:', e.message);
-        if (process.env.DEBUG_SHOTS === 'true') {
-          await page.screenshot({ path: 'error_daily.png', fullPage: true });
-          console.log('[daily] Saved screenshot: error_daily.png');
-        }
-      }
-    }
-
-    console.log('[main] Flow complete.');
-  } catch (e) {
-    console.error('[error] Flow failed:', e.message);
-    if (browser && process.env.DEBUG_SHOTS === 'true') {
-      try {
-        const page = (await browser.pages())[0];
-        await page.screenshot({ path: 'error_flow.png', fullPage: true });
-        console.log('[error] Saved screenshot: error_flow.png');
-      } catch {}
-    }
+  main({ year, month, dbMode }).catch(err => {
+    log.error({ err }, '[main] Fatal error');
     process.exitCode = 1;
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
-    if (dbMode) {
-      await db.closePool();
-    }
-  }
+  });
 }
 
-if (require.main === module) {
-  main();
-}
+module.exports = { main };
