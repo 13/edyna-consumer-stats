@@ -3,18 +3,8 @@ services:
     build: .
     container_name: edyna-scraper
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      - LOGIN_URL=${LOGIN_URL}
-      - USERNAME=${USERNAME}
-      - PASSWORD=${PASSWORD}
+      # Force headless in containers regardless of .env
       - HEADLESS=true
-      - DEBUG_SHOTS=${DEBUG_SHOTS:-false}
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=${DB_PORT:-5432}
-      - DB_NAME=${DB_NAME:-edyna}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_SSL=${DB_SSL:-false}
-      - CRON_SCHEDULE=${CRON_SCHEDULE:-0 8,9,10 * * *}
-      - TZ=${TZ:-Europe/Rome}
-      - RUN_ON_START=${RUN_ON_START:-false}

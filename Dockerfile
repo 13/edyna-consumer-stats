@@ -1,6 +1,6 @@
-FROM node:25-alpine
+FROM node:24-alpine
 
-# Install Chromium and dependencies for Puppeteer
+# Chromium + deps for Puppeteer; tini as PID 1 to reap Chromium zombies
 RUN apk add --no-cache \
     chromium \
     nss \
@@ -8,27 +8,28 @@ RUN apk add --no-cache \
     harfbuzz \
     ca-certificates \
     ttf-freefont \
-    tzdata
+    tzdata \
+    tini
 
-# Set timezone (make sure the file exists)
 ENV TZ=Europe/Rome
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# Set Puppeteer to use system Chromium
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+# Use system Chromium instead of the bundled download
+ENV PUPPETEER_SKIP_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
 
 WORKDIR /app
 
-# Copy package files
 COPY package*.json ./
+RUN npm ci --omit=dev
 
-# Install dependencies
-RUN npm install --only=production
-
-# Copy source code
 COPY src ./src
-COPY .env.example ./.env.example
 
-# Use node-cron scheduler
+USER node
+
+# Scheduler touches /tmp/edyna-heartbeat every 60s; stale file = dead event loop
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
+  CMD sh -c '[ $(( $(date +%s) - $(stat -c %Y /tmp/edyna-heartbeat 2>/dev/null || echo 0) )) -lt 300 ]'
+
+ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "src/scheduler.js"]

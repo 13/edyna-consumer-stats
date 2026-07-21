@@ -1,8 +1,7 @@
-const { Pool } = require('pg');
-const config = require('./config');
-const log = require('./logger');
-
-const HOURS_PER_DAY = 24;
+import pg from 'pg';
+import config from './config.js';
+import log from './logger.js';
+import { parseDayDate, hourTimestamps } from './util.js';
 
 let pool = null;
 
@@ -12,7 +11,7 @@ function getPool() {
       throw new Error('DB_USER and DB_PASSWORD are required for database mode');
     }
 
-    pool = new Pool({
+    pool = new pg.Pool({
       host:     config.DB_HOST,
       port:     config.DB_PORT,
       database: config.DB_NAME,
@@ -26,7 +25,7 @@ function getPool() {
   return pool;
 }
 
-async function initializeSchema() {
+export async function initializeSchema() {
   const client = await getPool().connect();
   try {
     log.info('Creating schema if not exists...');
@@ -50,9 +49,8 @@ async function initializeSchema() {
       }
     });
 
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_edyna_hourly_timestamp ON edyna_hourly (timestamp DESC);
-    `);
+    // PK already indexes timestamp; remove the duplicate index older versions created
+    await client.query('DROP INDEX IF EXISTS idx_edyna_hourly_timestamp;');
 
     log.info('Schema initialized');
   } finally {
@@ -60,88 +58,57 @@ async function initializeSchema() {
   }
 }
 
-async function saveDailyHourlyData(dailyData) {
-  const client = await getPool().connect();
-  try {
-    await client.query('BEGIN');
-
-    let insertedCount = 0;
-    let updatedCount = 0;
-
-    for (const day of dailyData.days) {
-      const dateStr = day.date;
-      let timestamp;
-
-      try {
-        if (/^\d{2}[/.]\d{2}[/.]\d{4}$/.test(dateStr)) {
-          const [d, m, y] = dateStr.split(/[/.]/).map(Number);
-          timestamp = new Date(y, m - 1, d);
-        } else if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-          timestamp = new Date(dateStr);
-        } else {
-          timestamp = new Date(dateStr);
-        }
-
-        if (isNaN(timestamp.getTime())) {
-          log.warn({ dateStr }, 'Skipping invalid date');
-          continue;
-        }
-      } catch (err) {
-        log.warn({ dateStr, err: err.message }, 'Failed to parse date');
-        continue;
-      }
-
-      for (let h = 0; h < HOURS_PER_DAY; h++) {
-        const hourLabel = `${String(h).padStart(2, '0')}:00`;
-        const kwh = day.hours[hourLabel];
-        if (kwh === null || kwh === undefined) continue;
-
-        const recordTimestamp = new Date(timestamp);
-        recordTimestamp.setHours(h, 0, 0, 0);
-
-        const existingResult = await client.query(
-          'SELECT kwh FROM edyna_hourly WHERE timestamp = $1',
-          [recordTimestamp]
-        );
-
-        const existingKwh = existingResult.rows.length > 0 ? existingResult.rows[0].kwh : null;
-        if (existingKwh !== null && kwh - existingKwh <= 0.001) continue;
-
-        await client.query(
-          `INSERT INTO edyna_hourly (timestamp, kwh)
-           VALUES ($1, $2)
-           ON CONFLICT (timestamp)
-           DO UPDATE SET kwh = EXCLUDED.kwh, updated_at = NOW()`,
-          [recordTimestamp, kwh]
-        );
-
-        if (existingKwh === null) {
-          insertedCount++;
-        } else {
-          updatedCount++;
-          log.debug({ ts: recordTimestamp.toISOString(), from: existingKwh, to: kwh }, 'Updated hourly record');
-        }
-      }
+/**
+ * Upsert scraped hourly values in one statement.
+ * Rows whose stored kwh already equals the scraped value are left untouched
+ * (IS DISTINCT FROM), so updated_at only moves on real changes.
+ *
+ * @param {{ year: number|null, days: Array<{date: string, hourly: Array<number|null>}> }} dailyData
+ */
+export async function saveDailyHourlyData(dailyData) {
+  const rows = [];
+  for (const day of dailyData.days) {
+    const parsedDate = parseDayDate(day.date, dailyData.year);
+    if (!parsedDate) {
+      log.warn({ date: day.date }, 'Skipping unparseable date');
+      continue;
     }
-
-    await client.query('COMMIT');
-    log.info({ insertedCount, updatedCount }, 'Saved daily hourly data');
-    return { insertedCount, updatedCount };
-  } catch (err) {
-    await client.query('ROLLBACK');
-    log.error({ err }, 'Error saving daily hourly data');
-    throw err;
-  } finally {
-    client.release();
+    const timestamps = hourTimestamps(parsedDate, day.hourly.length);
+    day.hourly.forEach((kwh, h) => {
+      if (kwh !== null && kwh !== undefined) rows.push([timestamps[h], kwh]);
+    });
   }
+
+  if (rows.length === 0) {
+    log.info('No rows to save');
+    return { insertedCount: 0, updatedCount: 0, unchangedCount: 0 };
+  }
+
+  const placeholders = rows.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(', ');
+  const params = rows.flat();
+
+  const result = await getPool().query(
+    `INSERT INTO edyna_hourly (timestamp, kwh)
+     VALUES ${placeholders}
+     ON CONFLICT (timestamp)
+     DO UPDATE SET kwh = EXCLUDED.kwh, updated_at = NOW()
+     WHERE edyna_hourly.kwh IS DISTINCT FROM EXCLUDED.kwh
+     RETURNING (xmax = 0) AS inserted`,
+    params
+  );
+
+  const insertedCount = result.rows.filter(r => r.inserted).length;
+  const updatedCount = result.rows.length - insertedCount;
+  const unchangedCount = rows.length - result.rows.length;
+
+  log.info({ insertedCount, updatedCount, unchangedCount }, 'Saved daily hourly data');
+  return { insertedCount, updatedCount, unchangedCount };
 }
 
-async function closePool() {
+export async function closePool() {
   if (pool) {
     await pool.end();
     pool = null;
     log.info('Database connection closed');
   }
 }
-
-module.exports = { initializeSchema, saveDailyHourlyData, closePool };

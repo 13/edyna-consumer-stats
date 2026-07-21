@@ -1,24 +1,33 @@
 {
   "name": "edyna-consumer-stats",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Scrape Edyna consumer statistics",
+  "type": "module",
   "main": "src/index.js",
+  "engines": {
+    "node": ">=22.9.0"
+  },
   "scripts": {
-    "start": "node src/index.js",
-    "start:db": "node src/index.js --db",
-    "start:cron": "node src/scheduler.js",
-    "dev": "NODE_ENV=development node src/index.js"
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "start:db": "node --env-file-if-exists=.env src/index.js --db",
+    "start:cron": "node --env-file-if-exists=.env src/scheduler.js",
+    "dev": "LOG_LEVEL=debug node --env-file-if-exists=.env src/index.js",
+    "test": "node --test",
+    "lint": "eslint ."
   },
   "keywords": [],
   "author": "ben",
   "license": "MIT",
-  "type": "commonjs",
   "dependencies": {
-    "dotenv": "^17.4.2",
     "node-cron": "^4.2.1",
     "pg": "^8.20.0",
     "pino": "^10.3.1",
     "puppeteer": "^25.0.2",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "eslint": "^9.39.0",
+    "globals": "^16.0.0"
   }
 }

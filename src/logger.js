@@ -1,4 +1,4 @@
-const pino = require('pino');
-const config = require('./config');
+import pino from 'pino';
+import config from './config.js';
 
-module.exports = pino({ level: config.LOG_LEVEL });
+export default pino({ level: config.LOG_LEVEL });

@@ -1,17 +1,18 @@
-require('dotenv').config();
-const { z } = require('zod');
+import os from 'node:os';
+import { z } from 'zod';
 
-const boolStr = (def) =>
-  z.enum(['true', 'false']).default(def ? 'true' : 'false').transform(v => v === 'true');
+const boolStr = (def) => z.stringbool().default(def ? 'true' : 'false');
 
 const schema = z.object({
   LOGIN_URL:                   z.string().min(1, 'LOGIN_URL is required'),
-  USERNAME:                    z.string().min(1, 'USERNAME is required'),
-  PASSWORD:                    z.string().min(1, 'PASSWORD is required'),
+  // EDYNA_ prefix avoids collision with the shell's own USERNAME variable
+  EDYNA_USERNAME:              z.string().min(1, 'EDYNA_USERNAME is required'),
+  EDYNA_PASSWORD:              z.string().min(1, 'EDYNA_PASSWORD is required'),
   HEADLESS:                    boolStr(true),
   DEBUG_SHOTS:                 boolStr(false),
+  SCREENSHOT_DIR:              z.string().default(os.tmpdir()),
   DB_HOST:                     z.string().default('localhost'),
-  DB_PORT:                     z.string().regex(/^\d+$/).default('5432').transform(Number),
+  DB_PORT:                     z.coerce.number().int().positive().default(5432),
   DB_NAME:                     z.string().default('edyna'),
   DB_USER:                     z.string().optional(),
   DB_PASSWORD:                 z.string().optional(),
@@ -21,8 +22,8 @@ const schema = z.object({
   RUN_ON_START:                boolStr(false),
   TZ:                          z.string().default('Europe/Rome'),
   LOG_LEVEL:                   z.enum(['debug', 'info', 'warn', 'error']).default('info'),
-  SCRAPE_RETRIES:              z.string().regex(/^\d+$/).default('1').transform(Number),
-  SCRAPE_RETRY_DELAY_MS:       z.string().regex(/^\d+$/).default('10000').transform(Number),
+  SCRAPE_RETRIES:              z.coerce.number().int().min(1).default(3),
+  SCRAPE_RETRY_DELAY_MS:       z.coerce.number().int().min(0).default(10000),
 });
 
 const result = schema.safeParse(process.env);
@@ -32,4 +33,7 @@ if (!result.success) {
   process.exit(1);
 }
 
-module.exports = result.data;
+// Date parsing and cron must agree on the timezone the portal reports in.
+process.env.TZ = result.data.TZ;
+
+export default result.data;

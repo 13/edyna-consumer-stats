@@ -5,7 +5,7 @@
  *  - Click first curve button (Stundenprofil)
  *  - Scrape monthly Wirkenergie (kWh) values shown in curve tab
  *  - Navigate to daily view for latest month with data
- *  - Scrape daily hourly kWh usage (24-hour breakdown per day)
+ *  - Scrape daily hourly kWh usage (per-hour breakdown per day)
  *  - Save to TimescaleDB database (--db flag)
  *
  * ENV: see src/config.js for full list
@@ -19,10 +19,14 @@
  *   node src/index.js --db --year 2025 --month 3       - Above + save to database
  */
 
-const puppeteer = require('puppeteer');
-const config = require('./config');
-const log = require('./logger');
-const db = require('./db');
+import { parseArgs } from 'node:util';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import puppeteer from 'puppeteer';
+import config from './config.js';
+import log from './logger.js';
+import * as db from './db.js';
+import { normalizeNumber } from './util.js';
 
 /* ---------- Selectors ---------- */
 const SELECTORS = {
@@ -40,21 +44,9 @@ const SELECTORS = {
   monthBtnPrefix: 'body_ctl00_ctl00_tcListUtenze_TCurve_cCurve_gvCurveAttiva_btnCurve',
 };
 
-const HOURS_PER_DAY = 24;
-
 /* ---------- Utilities ---------- */
 function sleep(ms) {
   return new Promise(res => setTimeout(res, ms));
-}
-
-function normalizeNumber(str) {
-  if (!str || str === '' || str === '-' || str === 'N/A') return null;
-  const normalized = str
-    .replace(/\./g, '')
-    .replace(',', '.')
-    .replace(/[^\d.-]/g, '');
-  const num = normalized ? parseFloat(normalized) : null;
-  return Number.isFinite(num) ? num : null;
 }
 
 async function withRetry(fn, { maxAttempts = 3, baseDelay = 10000, label = 'operation' } = {}) {
@@ -74,6 +66,17 @@ async function withRetry(fn, { maxAttempts = 3, baseDelay = 10000, label = 'oper
   throw lastErr;
 }
 
+async function saveScreenshot(page, name) {
+  if (!config.DEBUG_SHOTS) return;
+  try {
+    const file = path.join(config.SCREENSHOT_DIR, name);
+    await page.screenshot({ path: file, fullPage: true });
+    log.info({ file }, '[debug] Screenshot saved');
+  } catch (err) {
+    log.warn({ err: err.message }, '[debug] Screenshot failed');
+  }
+}
+
 /* ---------- Browser ---------- */
 async function launchBrowser() {
   return puppeteer.launch({
@@ -83,58 +86,48 @@ async function launchBrowser() {
   });
 }
 
+/* ---------- Generic idle wait ---------- */
+// WebForms partial postbacks don't always navigate, so a bounded network-idle
+// wait is the best available "page settled" signal.
+async function settle(page, { timeout = 20000 } = {}) {
+  try {
+    await page.waitForNetworkIdle({ idleTime: 750, timeout });
+  } catch {
+    log.debug({ timeout }, '[settle] Network not idle within timeout, continuing');
+  }
+}
+
 /* ---------- Login ---------- */
 async function performLogin(page, { loginUrl, username, password }) {
   log.info({ loginUrl }, '[login] Opening login URL');
   await page.goto(loginUrl, { waitUntil: 'domcontentloaded' });
 
-  await page.waitForSelector(SELECTORS.loginUser,     { timeout: 5000 });
-  await page.waitForSelector(SELECTORS.loginPassword, { timeout: 5000 });
-  await page.waitForSelector(SELECTORS.loginBtn,      { timeout: 5000 });
-
   log.info('[login] Filling credentials');
-  await page.click(SELECTORS.loginUser, { clickCount: 3 });
-  await page.type(SELECTORS.loginUser, username, { delay: 35 });
-  await page.click(SELECTORS.loginPassword, { clickCount: 3 });
-  await page.type(SELECTORS.loginPassword, password, { delay: 40 });
+  await page.locator(SELECTORS.loginUser).setTimeout(5000).fill(username);
+  await page.locator(SELECTORS.loginPassword).setTimeout(5000).fill(password);
 
   log.info('[login] Submitting');
   const beforeUrl = page.url();
-  await page.click(SELECTORS.loginBtn);
-
-  await Promise.race([
-    page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
-  ]);
+  await page.locator(SELECTORS.loginBtn).setTimeout(5000).click();
+  await settle(page, { timeout: 20000 });
 
   const afterUrl = page.url();
   const loginPanelExists = await page.$(SELECTORS.loginPanel) !== null;
   const success = !loginPanelExists || (afterUrl !== beforeUrl && !afterUrl.includes('Login.tws'));
 
   if (!success) {
-    if (config.DEBUG_SHOTS) {
-      await page.screenshot({ path: 'login_failure.png', fullPage: true });
-      log.info('[login] Screenshot saved: login_failure.png');
-    }
+    await saveScreenshot(page, 'login_failure.png');
     throw new Error('Login not confirmed as successful.');
   }
   log.info({ afterUrl }, '[login] Login successful');
 }
 
-/* ---------- Generic idle wait ---------- */
-async function waitForIdle(page, { timeout = 20000 } = {}) {
-  await Promise.race([
-    page.waitForNavigation({ waitUntil: 'networkidle2', timeout }).catch(() => {}),
-  ]);
-}
-
 /* ---------- Click Verbraucher ---------- */
 async function clickVerbraucher(page) {
-  log.info('[verbraucher] Waiting for menu item');
-  await page.waitForSelector(SELECTORS.menuVerbraucher, { timeout: 25000 });
-
+  log.info('[verbraucher] Clicking menu item');
   const beforeUrl = page.url();
-  await page.click(SELECTORS.menuVerbraucher);
-  await waitForIdle(page, { timeout: 30000 });
+  await page.locator(SELECTORS.menuVerbraucher).setTimeout(25000).click();
+  await settle(page, { timeout: 30000 });
 
   const tabExists   = await page.$(SELECTORS.tabContainer)   !== null;
   const tableExists = await page.$(SELECTORS.consumerTable)  !== null;
@@ -149,14 +142,12 @@ async function clickVerbraucher(page) {
 async function clickFirstCurve(page) {
   log.info('[curve] Waiting for curve button');
   try {
-    await page.waitForSelector(SELECTORS.curveBtn, { timeout: 360000 });
-  } catch {
-    log.warn('[curve] Curve button not found within timeout, attempting fallback');
-    return;
+    await page.locator(SELECTORS.curveBtn).setTimeout(360000).click();
+  } catch (err) {
+    await saveScreenshot(page, 'curve_button_failure.png');
+    throw new Error(`Curve button (btnCurve_0) not clickable: ${err.message}`);
   }
-
-  await page.click(SELECTORS.curveBtn);
-  await waitForIdle(page, { timeout: 360000 });
+  await settle(page, { timeout: 360000 });
 }
 
 /* ---------- Select year ---------- */
@@ -177,7 +168,7 @@ async function selectYear(page, year) {
 
   log.info({ year }, '[year] Selecting year');
   await page.select(SELECTORS.yearDropdown, String(year));
-  await waitForIdle(page, { timeout: 60000 });
+  await settle(page, { timeout: 60000 });
   log.info({ year }, '[year] Year selected');
 }
 
@@ -265,13 +256,18 @@ async function findLatestNonNullMonthAndClick(page, monthsData, targetMonthIndex
   }
 
   log.info({ month: lastNonNullMonth }, '[daily] Navigating to monthly view');
-  await waitForIdle(page, { timeout: 360000 });
+  await settle(page, { timeout: 360000 });
 
   return lastNonNullMonth;
 }
 
 /* ---------- Scrape daily hourly usage ---------- */
-async function scrapeDailyHourlyUsage(page, monthName = null) {
+/**
+ * Returns { year, month, days: [{ date, hourly: Array<number|null>, total_kwh }] }.
+ * `hourly` keeps every value column the portal shows (23/24/25 on DST days);
+ * index h = h-th hour after local midnight.
+ */
+async function scrapeDailyHourlyUsage(page, { monthName = null, expectedYear = null } = {}) {
   log.info('[daily] Parsing daily hourly data');
 
   const data = await page.evaluate(() => {
@@ -311,7 +307,7 @@ async function scrapeDailyHourlyUsage(page, monthName = null) {
 
   log.info({ tableId: data.tableId, columns: data.headers.length, days: data.days.length }, '[daily] Found hourly table');
 
-  let year = new Date().getFullYear();
+  let year = expectedYear ?? new Date().getFullYear();
   if (data.days.length > 0) {
     const yearMatch = data.days[0].dateCell.match(/\d{4}/);
     if (yearMatch) year = parseInt(yearMatch[0], 10);
@@ -320,25 +316,19 @@ async function scrapeDailyHourlyUsage(page, monthName = null) {
   const result = { year, month: monthName, days: [] };
 
   for (const dayData of data.days) {
-    const hours = {};
-    let totalKwh = 0;
-    let validValues = 0;
+    const hourly = dayData.hourlyValues.map(normalizeNumber);
+    const valid = hourly.filter(v => v !== null);
+    if (valid.length === 0) continue;
 
-    for (let h = 0; h < Math.min(HOURS_PER_DAY, dayData.hourlyValues.length); h++) {
-      const hourLabel = `${String(h).padStart(2, '0')}:00`;
-      const value = normalizeNumber(dayData.hourlyValues[h]);
-      hours[hourLabel] = value;
-      if (value !== null) { totalKwh += value; validValues++; }
-    }
-
-    if (validValues > 0) {
-      result.days.push({ date: dayData.dateCell, hours, total_kwh: parseFloat(totalKwh.toFixed(3)) });
-    }
+    const totalKwh = valid.reduce((sum, v) => sum + v, 0);
+    result.days.push({
+      date: dayData.dateCell,
+      hourly,
+      total_kwh: parseFloat(totalKwh.toFixed(3)),
+    });
   }
 
-  if (result.days.length > 0) {
-    result.days.forEach(day => log.debug({ date: day.date, total_kwh: day.total_kwh }, '[daily]'));
-  }
+  result.days.forEach(day => log.debug({ date: day.date, total_kwh: day.total_kwh }, '[daily]'));
 
   return result;
 }
@@ -358,14 +348,14 @@ async function scrapeSession({ loginUrl, username, password, dbMode, targetYear,
 
     if (targetYear !== null) {
       await selectYear(page, targetYear);
-      Object.assign(monthlyData, await scrapeMonthlyActiveEnergy(page));
+      monthlyData = await scrapeMonthlyActiveEnergy(page);
     }
 
     log.info({ parsed: monthlyData.parsed }, '[main] Monthly Wirkenergie');
 
     const monthName = await findLatestNonNullMonthAndClick(page, monthlyData, targetMonthIndex);
     if (monthName) {
-      const dailyData = await scrapeDailyHourlyUsage(page, monthName);
+      const dailyData = await scrapeDailyHourlyUsage(page, { monthName, expectedYear: targetYear });
 
       if (dailyData && dailyData.days.length > 0) {
         log.info({ days: dailyData.days.length }, '[main] Daily hourly data scraped');
@@ -378,14 +368,9 @@ async function scrapeSession({ loginUrl, username, password, dbMode, targetYear,
       }
     }
   } catch (err) {
-    if (browser && config.DEBUG_SHOTS) {
-      try {
-        const pages = await browser.pages();
-        if (pages[0]) {
-          await pages[0].screenshot({ path: 'error_scrape.png', fullPage: true });
-          log.info('[error] Saved screenshot: error_scrape.png');
-        }
-      } catch {}
+    if (browser) {
+      const pages = await browser.pages().catch(() => []);
+      if (pages[0]) await saveScreenshot(pages[0], 'error_scrape.png');
     }
     throw err;
   } finally {
@@ -394,7 +379,7 @@ async function scrapeSession({ loginUrl, username, password, dbMode, targetYear,
 }
 
 /* ---------- Main ---------- */
-async function main({ year = null, month = null, dbMode = false } = {}) {
+export async function main({ year = null, month = null, dbMode = false } = {}) {
   if (year !== null && (!Number.isFinite(year) || year < 2020 || year > 2100)) {
     throw new Error(`Invalid year: ${year}. Expected a 4-digit year between 2020-2100.`);
   }
@@ -413,8 +398,8 @@ async function main({ year = null, month = null, dbMode = false } = {}) {
     await withRetry(
       () => scrapeSession({
         loginUrl: config.LOGIN_URL,
-        username: config.USERNAME,
-        password: config.PASSWORD,
+        username: config.EDYNA_USERNAME,
+        password: config.EDYNA_PASSWORD,
         dbMode,
         targetYear: year,
         targetMonthIndex,
@@ -428,20 +413,23 @@ async function main({ year = null, month = null, dbMode = false } = {}) {
 }
 
 /* ---------- CLI entry point ---------- */
-if (require.main === module) {
-  const rawArgs = process.argv.slice(2);
-  const args = new Set(rawArgs);
-  const dbMode = args.has('--db') || args.has('db');
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+  const { values, positionals } = parseArgs({
+    options: {
+      db:    { type: 'boolean', default: false },
+      year:  { type: 'string' },
+      month: { type: 'string' },
+    },
+    allowPositionals: true,
+  });
 
-  const yearIdx  = rawArgs.indexOf('--year');
-  const monthIdx = rawArgs.indexOf('--month');
-  const year  = yearIdx  !== -1 ? parseInt(rawArgs[yearIdx  + 1], 10) : null;
-  const month = monthIdx !== -1 ? parseInt(rawArgs[monthIdx + 1], 10) : null;
+  const dbMode = values.db || positionals.includes('db');
+  const year  = values.year  !== undefined ? parseInt(values.year, 10)  : null;
+  const month = values.month !== undefined ? parseInt(values.month, 10) : null;
 
   main({ year, month, dbMode }).catch(err => {
     log.error({ err }, '[main] Fatal error');
     process.exitCode = 1;
   });
 }
-
-module.exports = { main };
