@@ -1,7 +1,9 @@
 import os from 'node:os';
 import { z } from 'zod';
 
-const boolStr = (def) => z.stringbool().default(def ? 'true' : 'false');
+// Zod 4's .default() takes the *output* type and bypasses parsing,
+// so the default must be a boolean, not the string 'true'/'false'.
+const boolStr = (def) => z.stringbool().default(def);
 
 const schema = z.object({
   LOGIN_URL:                   z.string().min(1, 'LOGIN_URL is required'),
@@ -26,7 +28,15 @@ const schema = z.object({
   SCRAPE_RETRY_DELAY_MS:       z.coerce.number().int().min(0).default(10000),
 });
 
-const result = schema.safeParse(process.env);
+// Every key may also be set with an EDYNA_ prefix (e.g. EDYNA_CRON_SCHEDULE),
+// so a shared .env can namespace all scraper vars. Prefixed wins over unprefixed.
+const env = { ...process.env };
+for (const key of Object.keys(schema.shape)) {
+  const prefixed = process.env[`EDYNA_${key}`];
+  if (prefixed !== undefined) env[key] = prefixed;
+}
+
+const result = schema.safeParse(env);
 if (!result.success) {
   const issues = result.error.issues.map(i => `  ${i.path[0]}: ${i.message}`).join('\n');
   console.error('[config] Invalid or missing environment variables:\n' + issues);

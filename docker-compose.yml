@@ -7,4 +7,5 @@ services:
       - .env
     environment:
       # Force headless in containers regardless of .env
-      - HEADLESS=true
+      # (EDYNA_-prefixed form wins over unprefixed, see src/config.js)
+      - EDYNA_HEADLESS=true
