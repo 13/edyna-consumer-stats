@@ -66,7 +66,9 @@ export async function initializeSchema() {
  * @param {{ year: number|null, days: Array<{date: string, hourly: Array<number|null>}> }} dailyData
  */
 export async function saveDailyHourlyData(dailyData) {
-  const rows = [];
+  // Map keyed by epoch ms: a single INSERT must not contain the same
+  // timestamp twice (Postgres 21000). Last value wins; overlaps are logged.
+  const byTimestamp = new Map();
   for (const day of dailyData.days) {
     const parsedDate = parseDayDate(day.date, dailyData.year);
     if (!parsedDate) {
@@ -75,9 +77,16 @@ export async function saveDailyHourlyData(dailyData) {
     }
     const timestamps = hourTimestamps(parsedDate, day.hourly.length);
     day.hourly.forEach((kwh, h) => {
-      if (kwh !== null && kwh !== undefined) rows.push([timestamps[h], kwh]);
+      if (kwh === null || kwh === undefined) return;
+      const ts = timestamps[h];
+      if (byTimestamp.has(ts.getTime())) {
+        log.warn({ timestamp: ts.toISOString(), date: day.date, hour: h },
+          'Duplicate timestamp in scraped batch, keeping last value');
+      }
+      byTimestamp.set(ts.getTime(), [ts, kwh]);
     });
   }
+  const rows = [...byTimestamp.values()];
 
   if (rows.length === 0) {
     log.info('No rows to save');

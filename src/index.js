@@ -26,7 +26,7 @@ import puppeteer from 'puppeteer';
 import config from './config.js';
 import log from './logger.js';
 import * as db from './db.js';
-import { normalizeNumber } from './util.js';
+import { normalizeNumber, isAggregateHeader } from './util.js';
 
 /* ---------- Selectors ---------- */
 const SELECTORS = {
@@ -307,6 +307,10 @@ async function scrapeDailyHourlyUsage(page, { monthName = null, expectedYear = n
 
   log.info({ tableId: data.tableId, columns: data.headers.length, days: data.days.length }, '[daily] Found hourly table');
 
+  // The grid's last column is an aggregate ("Summe"), not a 25th hour —
+  // keeping it would map the day total onto the next day's 00:00 timestamp.
+  const dropTrailingTotal = isAggregateHeader(data.headers.at(-1));
+
   let year = expectedYear ?? new Date().getFullYear();
   if (data.days.length > 0) {
     const yearMatch = data.days[0].dateCell.match(/\d{4}/);
@@ -316,7 +320,8 @@ async function scrapeDailyHourlyUsage(page, { monthName = null, expectedYear = n
   const result = { year, month: monthName, days: [] };
 
   for (const dayData of data.days) {
-    const hourly = dayData.hourlyValues.map(normalizeNumber);
+    const values = dropTrailingTotal ? dayData.hourlyValues.slice(0, -1) : dayData.hourlyValues;
+    const hourly = values.map(normalizeNumber);
     const valid = hourly.filter(v => v !== null);
     if (valid.length === 0) continue;
 

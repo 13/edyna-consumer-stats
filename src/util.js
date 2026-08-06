@@ -37,6 +37,18 @@ export function parseDayDate(dateStr, fallbackYear = null) {
   return null;
 }
 
+/**
+ * True when a table header labels an aggregate column ("Summe", "Total", …)
+ * rather than an hour-of-day. The portal's hourly grid ends with such a
+ * column; it must be dropped before mapping columns to hours, or the
+ * total lands on midnight+24h and collides with the next day's 00:00 row.
+ */
+export function isAggregateHeader(text) {
+  // Starts-with match: covers "Summe", "Summe (kWh)", "Totale", "Tot." —
+  // hour headers are time-like ("01:00") and can never match.
+  return /^(summe|gesamt|total|somma|tot\.)/i.test((text ?? '').trim());
+}
+
 const HOUR_MS = 3_600_000;
 
 /**

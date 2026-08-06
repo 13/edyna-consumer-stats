@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeNumber, parseDayDate, hourTimestamps } from '../src/util.js';
+import { normalizeNumber, parseDayDate, hourTimestamps, isAggregateHeader } from '../src/util.js';
 
 describe('normalizeNumber', () => {
   test('parses de-AT formatted numbers', () => {
@@ -47,6 +47,25 @@ describe('parseDayDate', () => {
     assert.equal(parseDayDate(''), null);
     assert.equal(parseDayDate('foo'), null);
     assert.equal(parseDayDate(null), null);
+  });
+});
+
+describe('isAggregateHeader', () => {
+  test('recognizes total column headers across portal locales', () => {
+    assert.equal(isAggregateHeader('Summe'), true);
+    assert.equal(isAggregateHeader('Summe (kWh)'), true);
+    assert.equal(isAggregateHeader('Gesamt'), true);
+    assert.equal(isAggregateHeader('Totale'), true);
+    assert.equal(isAggregateHeader('Tot.'), true);
+    assert.equal(isAggregateHeader(' total '), true);
+  });
+
+  test('never matches hour or date headers', () => {
+    assert.equal(isAggregateHeader('01:00'), false);
+    assert.equal(isAggregateHeader('24:00'), false);
+    assert.equal(isAggregateHeader('Datum'), false);
+    assert.equal(isAggregateHeader(''), false);
+    assert.equal(isAggregateHeader(null), false);
   });
 });
 
